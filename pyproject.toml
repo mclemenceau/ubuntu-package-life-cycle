@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uplc"
+version = "0.1.0"
+description = "Observe a team's Ubuntu packages across the development pipeline"
+requires-python = ">=3.10"
+dependencies = ["PyYAML"]
+
+[project.scripts]
+uplc = "uplc.cli:main"
+
+[tool.setuptools]
+packages = ["uplc"]
