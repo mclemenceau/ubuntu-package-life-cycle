@@ -3,8 +3,9 @@ TEAM ?= foundations-bugs
 OUT ?= dashboard.html
 PORT ?= 8321
 DAYS ?= 0
+DB ?= $(or $(UPLC_DB),$(or $(XDG_DATA_HOME),$(HOME)/.local/share)/uplc/uplc.db)
 
-.PHONY: help install test ingest status stuck blockers html serve clean
+.PHONY: help install test ingest status stuck blockers html serve db clean
 
 help:
 	@echo "uplc — Ubuntu Package Life Cycle"
@@ -17,9 +18,11 @@ help:
 	@echo "  make blockers  migrations blocking the most packages"
 	@echo "  make html      write the self-contained dashboard (OUT=path)"
 	@echo "  make serve     serve the dashboard on localhost (PORT=n)"
+	@echo "  make db        open the sqlite database with sqlite3 (DB=path)"
 	@echo "  make clean     remove caches and build artifacts"
 	@echo ""
 	@echo "Common vars: TEAM=$(TEAM)"
+	@echo "DB: $(DB)"
 
 install:
 	$(PYTHON) -m pip install -e .
@@ -44,6 +47,9 @@ html:
 
 serve:
 	$(PYTHON) -m uplc serve --team $(TEAM) -p $(PORT)
+
+db:
+	sqlite3 $(DB)
 
 clean:
 	find . -name '__pycache__' -type d -exec rm -rf {} +
