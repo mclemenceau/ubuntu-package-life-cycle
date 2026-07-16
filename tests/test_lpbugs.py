@@ -96,7 +96,8 @@ class TestSync(unittest.TestCase):
         }
         with mock.patch.object(
                 lpbugs, "search_tasks",
-                side_effect=[open_entries, touched_entries]) as search, \
+                side_effect=[(open_entries, True),
+                             (touched_entries, True)]) as search, \
              mock.patch.object(lpbugs, "_cached_json",
                                side_effect=lambda url: bugs[url]):
             result = lpbugs.sync(self.conn, "foundations-bugs")
@@ -120,7 +121,8 @@ class TestSync(unittest.TestCase):
         newer = _bug_entry(101, "2026-07-01T00:00:00+00:00")
         with mock.patch.object(
                 lpbugs, "search_tasks",
-                return_value=[_task_entry(101, "ubuntu/+source/grub2")]) as search, \
+                return_value=([_task_entry(101, "ubuntu/+source/grub2")],
+                              True)) as search, \
              mock.patch.object(lpbugs, "_cached_json", return_value=newer):
             result = lpbugs.sync(self.conn, "foundations-bugs")
         self.assertFalse(result.first_sync)
@@ -138,7 +140,8 @@ class TestSync(unittest.TestCase):
             f"{API}/bugs/555/bug_tasks": {
                 "entries": [_task_entry(555, "ubuntu/+source/openssl")]},
         }
-        with mock.patch.object(lpbugs, "search_tasks", return_value=[]), \
+        with mock.patch.object(lpbugs, "search_tasks",
+                               return_value=([], True)), \
              mock.patch.object(lpbugs, "_cached_json",
                                side_effect=lambda url: resources[url]):
             result = lpbugs.sync(self.conn, "foundations-bugs")
@@ -155,11 +158,29 @@ class TestSync(unittest.TestCase):
                               "2026-05-01T00:00:00+00:00")
         with mock.patch.object(
                 lpbugs, "search_tasks",
-                return_value=[_task_entry(9, "ubuntu/+source/glibc")]), \
+                return_value=([_task_entry(9, "ubuntu/+source/glibc")], True)), \
              mock.patch.object(lpbugs, "_cached_json",
                                side_effect=SourceUnavailable("boom")):
             result = lpbugs.sync(self.conn, "foundations-bugs")
         self.assertEqual(result.failed, [9])
+        state = db.bug_sync_state(self.conn, "foundations-bugs")
+        self.assertEqual(state["watermark"], "2026-05-01T00:00:00+00:00")
+
+    def test_interrupted_search_keeps_partial_and_holds_watermark(self):
+        db.set_bug_sync_state(self.conn, "foundations-bugs",
+                              "2026-05-01T00:00:00+00:00")
+        bug = _bug_entry(9, "2026-07-01T00:00:00+00:00")
+        with mock.patch.object(
+                lpbugs, "search_tasks",
+                return_value=([_task_entry(9, "ubuntu/+source/glibc")],
+                              False)), \
+             mock.patch.object(lpbugs, "_cached_json", return_value=bug):
+            result = lpbugs.sync(self.conn, "foundations-bugs")
+        self.assertFalse(result.search_complete)
+        # The bugs from completed pages are still ingested...
+        self.assertEqual(result.bugs_synced, 1)
+        self.assertEqual(db.bug_count(self.conn), 1)
+        # ...but the watermark holds so the gap is re-covered next run.
         state = db.bug_sync_state(self.conn, "foundations-bugs")
         self.assertEqual(state["watermark"], "2026-05-01T00:00:00+00:00")
 

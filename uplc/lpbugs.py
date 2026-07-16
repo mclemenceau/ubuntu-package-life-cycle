@@ -35,15 +35,22 @@ CLOSED_BUG_STATUSES = (
 )
 ALL_BUG_STATUSES = OPEN_BUG_STATUSES + CLOSED_BUG_STATUSES
 
-SEARCH_PAGE_DELAY = 0.5     # seconds between search result pages
-BUG_FETCH_DELAY = 0.1       # seconds between by-ID bug fetches
+SEARCH_PAGE_DELAY = 2.0     # seconds between search result pages
+BUG_FETCH_DELAY = 0.2       # seconds between by-ID bug fetches
+MAX_BACKOFF = 60.0          # cap for our own exponential backoff
+MAX_RETRY_AFTER = 120.0     # cap for a server-requested Retry-After
 
 
-def _get_json(url: str, *, timeout: int = 60, retries: int = 4) -> dict:
-    """GET a Launchpad API URL, backing off on 429/5xx."""
+def _get_json(url: str, *, timeout: int = 60, retries: int = 6) -> dict:
+    """GET a Launchpad API URL, backing off on 429/5xx.
+
+    LP sheds load with routine 503s (often carrying a Retry-After header,
+    which wins over our own backoff), so waiting it out is normal
+    operation, not an error path.
+    """
     req = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT, "Accept": "application/json"})
-    delay = 2.0
+    delay = 3.0
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -51,15 +58,20 @@ def _get_json(url: str, *, timeout: int = 60, retries: int = 4) -> dict:
         except urllib.error.HTTPError as err:
             if err.code not in (429, 500, 502, 503, 504) or attempt == retries - 1:
                 raise SourceUnavailable(f"{url}: HTTP {err.code}") from err
+            wait = delay
+            retry_after = err.headers.get("Retry-After") if err.headers else None
+            if retry_after and retry_after.strip().isdigit():
+                wait = min(float(retry_after), MAX_RETRY_AFTER)
             log.warning("HTTP %d from Launchpad, retrying in %.0fs",
-                        err.code, delay)
+                        err.code, wait)
         except (urllib.error.URLError, TimeoutError, OSError) as err:
             if attempt == retries - 1:
                 raise SourceUnavailable(f"{url}: {err}") from err
+            wait = delay
             log.warning("Launchpad unreachable (%s), retrying in %.0fs",
-                        err, delay)
-        time.sleep(delay)
-        delay *= 2
+                        err, wait)
+        time.sleep(wait)
+        delay = min(delay * 2, MAX_BACKOFF)
     raise SourceUnavailable(url)  # unreachable
 
 
@@ -135,8 +147,14 @@ def search_tasks(
     *,
     statuses: tuple[str, ...],
     modified_since: str | None = None,
-) -> list[dict]:
-    """All bug tasks structurally subscribed by *team*, paginated."""
+) -> tuple[list[dict], bool]:
+    """All bug tasks structurally subscribed by *team*, paginated.
+
+    Returns (entries, complete). A page that stays unreachable through the
+    retries is a warning, not a failure: whatever was gathered still gets
+    ingested, and the caller holds the watermark so the next sync
+    re-covers the gap.
+    """
     params = [
         ("ws.op", "searchTasks"),
         ("structural_subscriber", f"{LP_API}/~{team}"),
@@ -149,14 +167,19 @@ def search_tasks(
 
     entries: list[dict] = []
     while url:
-        data = _get_json(url)
+        try:
+            data = _get_json(url)
+        except SourceUnavailable as err:
+            log.warning("search interrupted (%s); continuing with the "
+                        "%d tasks gathered so far", err, len(entries))
+            return entries, False
         entries.extend(data.get("entries", []))
         log.info("search page: %d/%s tasks", len(entries),
                  data.get("total_size", "?"))
         url = data.get("next_collection_link")
         if url:
             time.sleep(SEARCH_PAGE_DELAY)
-    return entries
+    return entries, True
 
 
 def pipeline_bug_ids(conn, team: str) -> set[int]:
@@ -183,6 +206,7 @@ class BugSyncResult:
     pipeline_fetched: int = 0
     watermark: str = ""
     failed: list = field(default_factory=list)  # bug ids we could not fetch
+    search_complete: bool = True
 
 
 def sync(conn, team: str) -> BugSyncResult:
@@ -193,14 +217,16 @@ def sync(conn, team: str) -> BugSyncResult:
     if state is None:
         log.info("first sync: all open bugs + everything touched since %s "
                  "(heavy, one-time)", FIRST_SYNC_SINCE)
-        entries = search_tasks(team, statuses=OPEN_BUG_STATUSES)
-        entries += search_tasks(team, statuses=ALL_BUG_STATUSES,
-                                modified_since=FIRST_SYNC_SINCE)
+        entries, complete = search_tasks(team, statuses=OPEN_BUG_STATUSES)
+        more, complete2 = search_tasks(team, statuses=ALL_BUG_STATUSES,
+                                       modified_since=FIRST_SYNC_SINCE)
+        entries += more
+        result.search_complete = complete and complete2
     else:
         since = _watermark_query_date(state["watermark"])
         log.info("incremental sync: bugs modified since %s", since)
-        entries = search_tasks(team, statuses=ALL_BUG_STATUSES,
-                               modified_since=since)
+        entries, result.search_complete = search_tasks(
+            team, statuses=ALL_BUG_STATUSES, modified_since=since)
 
     tasks_by_bug: dict[int, dict[tuple, dict]] = {}
     for entry in entries:
@@ -251,13 +277,16 @@ def sync(conn, team: str) -> BugSyncResult:
         result.pipeline_fetched += 1
         time.sleep(BUG_FETCH_DELAY)
 
-    # A failed fetch means we may not know that bug's date_last_updated;
-    # holding the watermark keeps it inside the next run's search window
-    # (or, on a first sync, re-runs the full sweep — cheap via the cache).
-    if result.failed:
+    # A failed fetch or an interrupted search means we may have missed
+    # updates; holding the watermark keeps them inside the next run's
+    # search window (or, on a first sync, re-runs the full sweep — cheap
+    # via the cache).
+    if result.failed or not result.search_complete:
         watermark = state["watermark"] if state is not None else ""
-        log.warning("%d bugs failed to fetch; watermark held for retry",
-                    len(result.failed))
+        log.warning("sync incomplete (%d fetch failures%s); "
+                    "watermark held for retry",
+                    len(result.failed),
+                    "" if result.search_complete else ", search interrupted")
     if watermark:
         db.set_bug_sync_state(conn, team, watermark)
         conn.commit()

@@ -38,6 +38,9 @@ def _cmd_bugs_sync(args) -> int:
     if result.failed:
         print(f"warning: {len(result.failed)} bugs failed to fetch; "
               "they will be retried on the next sync")
+    if not result.search_complete:
+        print("warning: search was interrupted by Launchpad; partial "
+              "results kept, the next sync re-covers the gap")
     return 0
 
 
