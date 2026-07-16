@@ -56,6 +56,7 @@ def fetch(url: str, *, timeout: int = 60, allow_stale: bool = True) -> bytes:
     if meta.get("last_modified"):
         req.add_header("If-Modified-Since", meta["last_modified"])
 
+    log.info("fetching %s", url)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()

@@ -44,16 +44,33 @@ def run_ingest(team: str, db_path: Path | None = None) -> IngestResult:
     series = devel_series()
     log.info("ingesting team=%s series=%s", team, series)
 
+    log.info("fetching team package mapping ...")
     packages = sources.team_packages(team)
     log.info("%d packages subscribed by %s", len(packages), team)
 
+    log.info("fetching + parsing proposed-migration excuses "
+             "(largest source, may take a minute) ...")
     excuses_generated, excuses = sources.load_excuses()
-    ubuntu_versions = sources.ubuntu_devel_versions()
-    debian_versions = sources.debian_unstable_versions()
-    mom = sources.mom_merges()
+    log.info("excuses for %d sources (generated %s)",
+             len(excuses), excuses_generated)
 
+    log.info("fetching Ubuntu devel Sources indexes ...")
+    ubuntu_versions = sources.ubuntu_devel_versions()
+    log.info("%d Ubuntu source versions", len(ubuntu_versions))
+
+    log.info("fetching Debian unstable Sources index ...")
+    debian_versions = sources.debian_unstable_versions()
+    log.info("%d Debian source versions", len(debian_versions))
+
+    log.info("fetching Merge-o-Matic reports ...")
+    mom = sources.mom_merges()
+    if mom:
+        log.info("%d outstanding merges in Merge-o-Matic", len(mom))
+
+    log.info("deriving package states ...")
     states = derive_all(packages, excuses, ubuntu_versions, debian_versions, mom)
 
+    log.info("recording snapshot ...")
     conn = db.connect(db_path)
     run_id = db.record_run(
         conn, states, team=team, series=series,

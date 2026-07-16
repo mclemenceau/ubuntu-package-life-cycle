@@ -145,6 +145,8 @@ def load_excuses() -> tuple[str, dict[str, Excuse]]:
     Returns (generated_date, {source: Excuse}).
     """
     raw = fetch(EXCUSES_URL, timeout=120)
+    log.info("parsing update_excuses.yaml (%.1f MiB compressed) ...",
+             len(raw) / 2**20)
     data = yaml.load(lzma.decompress(raw), Loader=_YamlLoader)
     excuses: dict[str, Excuse] = {}
     for item in data.get("sources", []):

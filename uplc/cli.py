@@ -124,6 +124,10 @@ def main(argv=None) -> int:
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s")
+    if not args.verbose:
+        # Step-level ingest progress stays visible so long fetches don't
+        # look like a hang; -v adds per-URL fetch and parse detail.
+        logging.getLogger("uplc.ingest").setLevel(logging.INFO)
     return args.func(args)
 
 
