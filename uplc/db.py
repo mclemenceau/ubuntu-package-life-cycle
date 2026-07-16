@@ -43,7 +43,41 @@ CREATE TABLE IF NOT EXISTS transitions (
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_package ON snapshots(package);
 CREATE INDEX IF NOT EXISTS idx_transitions_package ON transitions(package);
+CREATE TABLE IF NOT EXISTS bugs (
+    id INTEGER PRIMARY KEY,             -- Launchpad bug number
+    title TEXT,
+    tags TEXT,                          -- JSON array
+    date_created TEXT,
+    date_last_updated TEXT,
+    heat INTEGER,
+    origin TEXT NOT NULL DEFAULT 'subscription',  -- or 'pipeline'
+    fetched_at TEXT
+);
+CREATE TABLE IF NOT EXISTS bug_tasks (
+    bug_id INTEGER NOT NULL REFERENCES bugs(id),
+    package TEXT NOT NULL,              -- '' for distribution-wide tasks
+    series TEXT NOT NULL DEFAULT '',    -- '' for the devel task
+    status TEXT,
+    importance TEXT,
+    assignee TEXT,
+    date_created TEXT,
+    date_closed TEXT,
+    PRIMARY KEY (bug_id, package, series)
+);
+CREATE TABLE IF NOT EXISTS bug_sync (
+    team TEXT PRIMARY KEY,
+    watermark TEXT,                     -- max bug date_last_updated ingested
+    last_synced TEXT,
+    bug_count INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_bug_tasks_package ON bug_tasks(package);
 """
+
+# Launchpad statuses that count as "open" everywhere in uplc.
+OPEN_BUG_STATUSES = (
+    "New", "Incomplete", "Confirmed", "Triaged", "In Progress",
+    "Fix Committed", "Deferred",
+)
 
 
 def default_db_path() -> Path:
@@ -149,3 +183,94 @@ def state_entered_at(conn: sqlite3.Connection, package: str) -> str | None:
         "   ORDER BY run_id DESC LIMIT 1)",
         (package, package)).fetchone()
     return row["since"] if row else None
+
+
+def record_bug(conn: sqlite3.Connection, bug: dict, tasks: list[dict]) -> None:
+    """Upsert one bug and replace its task rows.
+
+    Bugs are mutable current-state (unlike pipeline snapshots): Launchpad's
+    date_created/date_closed already give retroactive history, so there is
+    nothing to lose by updating in place. A bug once seen via the team
+    subscription keeps origin='subscription' even if later re-fetched as a
+    pipeline reference.
+    """
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    conn.execute(
+        "INSERT INTO bugs (id, title, tags, date_created, date_last_updated,"
+        " heat, origin, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(id) DO UPDATE SET"
+        " title=excluded.title, tags=excluded.tags,"
+        " date_created=excluded.date_created,"
+        " date_last_updated=excluded.date_last_updated,"
+        " heat=excluded.heat, fetched_at=excluded.fetched_at,"
+        " origin=CASE WHEN bugs.origin='subscription' THEN 'subscription'"
+        "         ELSE excluded.origin END",
+        (bug["id"], bug.get("title", ""), json.dumps(bug.get("tags", [])),
+         bug.get("date_created", ""), bug.get("date_last_updated", ""),
+         bug.get("heat", 0), bug.get("origin", "subscription"), now))
+    conn.execute("DELETE FROM bug_tasks WHERE bug_id = ?", (bug["id"],))
+    for t in tasks:
+        conn.execute(
+            "INSERT OR REPLACE INTO bug_tasks (bug_id, package, series,"
+            " status, importance, assignee, date_created, date_closed)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (bug["id"], t.get("package", ""), t.get("series", ""),
+             t.get("status", ""), t.get("importance", ""),
+             t.get("assignee", ""), t.get("date_created", ""),
+             t.get("date_closed", "")))
+
+
+def bug_sync_state(conn: sqlite3.Connection, team: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM bug_sync WHERE team = ?", (team,)).fetchone()
+
+
+def set_bug_sync_state(
+    conn: sqlite3.Connection, team: str, watermark: str,
+) -> None:
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    count = conn.execute("SELECT COUNT(*) AS n FROM bugs").fetchone()["n"]
+    conn.execute(
+        "INSERT INTO bug_sync (team, watermark, last_synced, bug_count)"
+        " VALUES (?, ?, ?, ?) ON CONFLICT(team) DO UPDATE SET"
+        " watermark=excluded.watermark, last_synced=excluded.last_synced,"
+        " bug_count=excluded.bug_count",
+        (team, watermark, now, count))
+
+
+def bugs_with_tasks(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every bug task joined with its bug, for the reports."""
+    return conn.execute(
+        "SELECT b.id, b.title, b.tags, b.date_created, b.date_last_updated,"
+        " b.origin, t.package, t.series, t.status, t.importance, t.assignee,"
+        " t.date_closed FROM bugs b JOIN bug_tasks t ON t.bug_id = b.id"
+        " ORDER BY b.id").fetchall()
+
+
+def bug_count(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) AS n FROM bugs").fetchone()["n"]
+
+
+def open_bug_total(conn: sqlite3.Connection) -> int:
+    marks = ",".join("?" * len(OPEN_BUG_STATUSES))
+    return conn.execute(
+        f"SELECT COUNT(DISTINCT bug_id) AS n FROM bug_tasks"
+        f" WHERE status IN ({marks})", OPEN_BUG_STATUSES).fetchone()["n"]
+
+
+def open_bug_counts(conn: sqlite3.Connection) -> dict[str, dict]:
+    """Per-package open-bug stats: {package: {'open': n, 'high': n}}.
+
+    A bug counts once per package it targets (any series), as open when
+    any of its tasks for that package is in an open status.
+    """
+    marks = ",".join("?" * len(OPEN_BUG_STATUSES))
+    rows = conn.execute(
+        "SELECT package,"
+        " COUNT(DISTINCT bug_id) AS open_bugs,"
+        " COUNT(DISTINCT CASE WHEN importance IN ('Critical', 'High')"
+        "   THEN bug_id END) AS high_bugs"
+        f" FROM bug_tasks WHERE status IN ({marks}) AND package != ''"
+        " GROUP BY package", OPEN_BUG_STATUSES).fetchall()
+    return {r["package"]: {"open": r["open_bugs"], "high": r["high_bugs"]}
+            for r in rows}

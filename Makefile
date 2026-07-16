@@ -1,11 +1,11 @@
 PYTHON ?= python3
 TEAM ?= foundations-bugs
-OUT ?= dashboard.html
+OUT ?= dashboard
 PORT ?= 8321
 DAYS ?= 0
 DB ?= $(or $(UPLC_DB),$(or $(XDG_DATA_HOME),$(HOME)/.local/share)/uplc/uplc.db)
 
-.PHONY: help install test ingest status stuck blockers html serve db clean
+.PHONY: help install test ingest bugs-sync refresh status stuck blockers html serve db clean
 
 help:
 	@echo "uplc — Ubuntu Package Life Cycle"
@@ -13,10 +13,12 @@ help:
 	@echo "  make install   pip install -e . (adds the uplc entry point)"
 	@echo "  make test      run the unit test suite"
 	@echo "  make ingest    fetch sources + snapshot current state (network)"
+	@echo "  make bugs-sync sync team bugs from Launchpad (network; first run heavy)"
+	@echo "  make refresh   ingest + bugs-sync, in that order"
 	@echo "  make status    funnel summary + proposed pipeline"
 	@echo "  make stuck     blocked packages, oldest first (DAYS=N to filter)"
 	@echo "  make blockers  migrations blocking the most packages"
-	@echo "  make html      write the self-contained dashboard (OUT=path)"
+	@echo "  make html      write the dashboard site (OUT=dir, or OUT=x.html for overview only)"
 	@echo "  make serve     serve the dashboard on localhost (PORT=n)"
 	@echo "  make db        open the sqlite database with sqlite3 (DB=path)"
 	@echo "  make clean     remove caches and build artifacts"
@@ -32,6 +34,15 @@ test:
 
 ingest:
 	$(PYTHON) -m uplc -v ingest --team $(TEAM)
+
+bugs-sync:
+	$(PYTHON) -m uplc -v bugs-sync --team $(TEAM)
+
+# Sequential on purpose: bugs-sync reads the latest snapshot to find
+# pipeline-referenced bugs, so it must run after ingest (not under -j).
+refresh:
+	$(PYTHON) -m uplc -v ingest --team $(TEAM)
+	$(PYTHON) -m uplc -v bugs-sync --team $(TEAM)
 
 status:
 	$(PYTHON) -m uplc status --team $(TEAM)
@@ -53,4 +64,4 @@ db:
 
 clean:
 	find . -name '__pycache__' -type d -exec rm -rf {} +
-	rm -rf *.egg-info dashboard.html
+	rm -rf *.egg-info dashboard.html dashboard/

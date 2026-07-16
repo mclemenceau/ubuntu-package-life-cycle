@@ -27,6 +27,20 @@ def _cmd_ingest(args) -> int:
     return 0
 
 
+def _cmd_bugs_sync(args) -> int:
+    from .lpbugs import sync
+    conn = db.connect(args.db)
+    result = sync(conn, args.team)
+    kind = "first sync" if result.first_sync else "incremental sync"
+    print(f"{kind}: {result.bugs_synced} bugs updated, "
+          f"{result.pipeline_fetched} pipeline bugs fetched, "
+          f"watermark {result.watermark or '(not set)'}")
+    if result.failed:
+        print(f"warning: {len(result.failed)} bugs failed to fetch; "
+              "they will be retried on the next sync")
+    return 0
+
+
 def _cmd_status(args) -> int:
     conn = db.connect(args.db)
     print(report.status(conn, args.team))
@@ -52,11 +66,28 @@ def _wrap_page(body: str) -> str:
             f"{body}</body></html>")
 
 
+def _write_site(conn, team: str, outdir: Path) -> list[Path]:
+    from .htmlreport import PAGES
+    outdir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name, renderer in PAGES.items():
+        path = outdir / name
+        path.write_text(_wrap_page(renderer(conn, team)))
+        written.append(path)
+    return written
+
+
 def _cmd_html(args) -> int:
-    from .htmlreport import render
     conn = db.connect(args.db)
-    args.output.write_text(_wrap_page(render(conn, args.team)))
-    print(f"wrote {args.output}")
+    if args.output.suffix == ".html":
+        # Single-file compatibility mode: just the overview page.
+        from .htmlreport import render_index
+        args.output.write_text(_wrap_page(render_index(conn, args.team)))
+        print(f"wrote {args.output} (overview only; "
+              "use a directory for all pages)")
+        return 0
+    for path in _write_site(conn, args.team, args.output):
+        print(f"wrote {path}")
     return 0
 
 
@@ -64,11 +95,9 @@ def _cmd_serve(args) -> int:
     import http.server
     import tempfile
 
-    from .htmlreport import render
-
     conn = db.connect(args.db)
     tmpdir = Path(tempfile.mkdtemp(prefix="uplc-"))
-    (tmpdir / "index.html").write_text(_wrap_page(render(conn, args.team)))
+    _write_site(conn, args.team, tmpdir)
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -95,6 +124,13 @@ def main(argv=None) -> int:
     _add_common(p)
     p.set_defaults(func=_cmd_ingest)
 
+    p = sub.add_parser("bugs-sync",
+                       help="sync team bugs from Launchpad (watermarked; "
+                            "first run fetches everything open or touched "
+                            "this year)")
+    _add_common(p)
+    p.set_defaults(func=_cmd_bugs_sync)
+
     p = sub.add_parser("status", help="funnel summary + proposed pipeline")
     _add_common(p)
     p.set_defaults(func=_cmd_status)
@@ -109,10 +145,11 @@ def main(argv=None) -> int:
     _add_common(p)
     p.set_defaults(func=_cmd_blockers)
 
-    p = sub.add_parser("html", help="write the self-contained dashboard")
+    p = sub.add_parser("html", help="write the self-contained dashboard site")
     _add_common(p)
-    p.add_argument("-o", "--output", type=Path,
-                   default=Path("dashboard.html"))
+    p.add_argument("-o", "--output", type=Path, default=Path("dashboard"),
+                   help="output directory for all pages, or a .html file "
+                        "for the overview page only (default: dashboard/)")
     p.set_defaults(func=_cmd_html)
 
     p = sub.add_parser("serve", help="serve the dashboard over local HTTP")
@@ -128,6 +165,7 @@ def main(argv=None) -> int:
         # Step-level ingest progress stays visible so long fetches don't
         # look like a hang; -v adds per-URL fetch and parse detail.
         logging.getLogger("uplc.ingest").setLevel(logging.INFO)
+        logging.getLogger("uplc.lpbugs").setLevel(logging.INFO)
     return args.func(args)
 
 

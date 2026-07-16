@@ -6,14 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `uplc` observes where a team's Ubuntu packages (default: `foundations-bugs`,
 ~152 packages) sit in the development pipeline — Debian delta,
-proposed-migration, blockers — for a **manager audience** (funnel counts,
-what's stuck, biggest unblock opportunity).
+proposed-migration, blockers, bugs — for a **manager audience** (funnel
+counts, what's stuck, biggest unblock opportunity, where to press on bugs).
 
-**Core constraint: never add Launchpad API load.** All current data comes
+**Core constraint: never add Launchpad API load.** Pipeline data comes
 from bulk-published archive artifacts fetched with conditional GETs. The
-planned bug ingester (see README roadmap) is the only sanctioned LP API use:
-one `searchTasks(structural_subscriber=..., modified_since=watermark)` sync
-plus targeted by-ID fetches — never per-package polling.
+bug ingester (`lpbugs.py`) is the only sanctioned LP API use: one
+`searchTasks(structural_subscriber=..., modified_since=watermark)` sync
+plus targeted by-ID fetches (through the conditional-GET cache) — never
+per-package polling. First sync is deliberately heavy (everything open or
+touched since 2026-01-01); increments after that.
 
 ## Commands
 
@@ -21,8 +23,9 @@ plus targeted by-ID fetches — never per-package polling.
 python3 -m unittest discover -s tests          # run tests
 python3 -m unittest tests.test_state -v        # run one test module
 python3 -m uplc -v ingest                      # fetch sources + snapshot (network)
+python3 -m uplc -v bugs-sync                   # sync team bugs from LP (network)
 python3 -m uplc status | stuck | blockers      # terminal reports
-python3 -m uplc html -o dash.html | serve      # dashboard
+python3 -m uplc html -o dash | serve           # dashboard site (dir out, 3 pages)
 ```
 
 Run from the repo root (or `pip install -e .` for the `uplc` entry point).
@@ -38,9 +41,16 @@ sources.py    clients+parsers: team mapping, update_excuses.yaml.xz (britney),
 state.py      PURE functions: facts per package → PackageState (one of STATES,
               funnel-ordered; see README for meanings)
 ingest.py     orchestrates one run; devel series from /usr/share/distro-info
+lpbugs.py     watermarked LP bug sync (searchTasks + by-ID fetches); parsing
+              is pure functions, mocked in tests — never hit LP from tests
 db.py         SQLite (~/.local/share/uplc/uplc.db): ingest_runs + full snapshot
-              per run + derived transitions rows
-report.py     terminal tables      htmlreport.py  static dashboard
+              per run + derived transitions rows; bugs/bug_tasks/bug_sync are
+              upserted current state (LP dates give retroactive history)
+report.py     terminal tables
+htmlreport.py static dashboard site: index/packages/bugs pages (PAGES dict);
+              inline CSS+JS only, degrades to plain tables without JS.
+              Package names link to packages.html#pkg-<name> first; bug
+              numbers always link to Launchpad; filters live in URL hashes
 cli.py        argparse subcommands
 ```
 
@@ -71,9 +81,10 @@ Design invariants:
 
 ## Roadmap context (agreed with the user)
 
-Priorities: MoM+excuses first (done), then bugs. Bug ingester scope:
-open bugs `modified_since=2026-01-01` (deliberately modified-since, not
-created-in-2026), watermark sync thereafter, targeted fetches for bugs
-referenced by pipeline data (SRU verification, block-proposed) with no date
-filter. Then: pending-sru.json SRU track, sponsorship queue, trend rollups
-(day/week/month) over snapshot history.
+Priorities: MoM+excuses (done), bugs (done: `lpbugs.py` + packages/bugs
+dashboard pages). Bug scope: everything open or touched since 2026-01-01
+(deliberately modified-since, not created-in-2026), watermark sync
+thereafter, targeted fetches for pipeline-referenced bugs (SRU
+verification, block-proposed) with no date filter. Next: pending-sru.json
+SRU track, sponsorship queue, trend rollups (day/week/month) over snapshot
+history.
