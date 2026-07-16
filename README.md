@@ -29,8 +29,8 @@ gentle: each `bugs-sync` runs **one** `searchTasks` query
 (`structural_subscriber=<team>` + a `modified_since` watermark) and then
 fetches exactly the bugs that search returned by ID through the same
 conditional-GET cache — never per-package polling. The first sync is heavy
-(every bug open or touched this year); every later sync is a small
-increment. Bugs referenced by pipeline data (block-proposed /
+(every bug touched this year, whatever its status); every later sync is a
+small increment. Bugs referenced by pipeline data (block-proposed /
 update-excuse) are fetched by ID regardless of subscription.
 
 ## Usage
@@ -91,8 +91,10 @@ not-in-devel       subscribed package absent from the devel series
 - The excuses file and archive indexes are generated at different times;
   a migration completed in between is detected via version comparison.
 - Debian comparison uses unstable main only.
-- Bug sync is anonymous, so private bugs are invisible. Bugs closed before
-  2026 and untouched since are out of scope by design.
+- Bug sync is anonymous, so private bugs are invisible. Bugs with no
+  activity since 2026-01-01 are out of scope by design — even ones still
+  open. The team's dormant backlog is huge and isn't actionable signal;
+  scope is "touched this year", not "all open ever".
 
 ## Roadmap
 

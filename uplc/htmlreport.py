@@ -820,9 +820,9 @@ def render_bugs(conn: sqlite3.Connection, team: str) -> str:
 {_nav('bugs.html')}
 <h1>Bugs — {_e(team)}</h1>
 <div class="card"><p class="empty">No bug data yet. Run
-<code>uplc bugs-sync</code> — the first sync fetches every bug open or
-touched this year (heavy, one-time); after that each sync is a small
-watermarked increment.</p></div>
+<code>uplc bugs-sync</code> — the first sync fetches every bug touched
+this year (heavy, one-time); after that each sync is a small watermarked
+increment.</p></div>
 {_footer()}
 </div></div>
 """
@@ -924,7 +924,7 @@ watermarked increment.</p></div>
 <div class="uplc"><div class="wrap">
 {_nav('bugs.html')}
 <h1>Bugs — {_e(team)}</h1>
-<div class="meta">{len(bugs)} bugs open or touched since {FIRST_SYNC_SINCE}{synced}
+<div class="meta">{len(bugs)} bugs touched since {FIRST_SYNC_SINCE}{synced}
  · "Activity" is time since the last change on the bug</div>
 <div class="tiles">{tiles}</div>
 {_gating_table(refs, by_id)}

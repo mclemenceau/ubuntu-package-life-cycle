@@ -14,8 +14,10 @@ from bulk-published archive artifacts fetched with conditional GETs. The
 bug ingester (`lpbugs.py`) is the only sanctioned LP API use: one
 `searchTasks(structural_subscriber=..., modified_since=watermark)` sync
 plus targeted by-ID fetches (through the conditional-GET cache) — never
-per-package polling. First sync is deliberately heavy (everything open or
-touched since 2026-01-01); increments after that.
+per-package polling. First sync is deliberately heavy (everything touched
+since 2026-01-01, any status); increments after that. Dormant-but-open
+bugs are excluded on purpose — an all-open sweep was tried and pulled in
+12k untouched bugs, drowning the actionable ~1k.
 
 ## Commands
 
@@ -82,8 +84,9 @@ Design invariants:
 ## Roadmap context (agreed with the user)
 
 Priorities: MoM+excuses (done), bugs (done: `lpbugs.py` + packages/bugs
-dashboard pages). Bug scope: everything open or touched since 2026-01-01
-(deliberately modified-since, not created-in-2026), watermark sync
+dashboard pages). Bug scope: everything touched since 2026-01-01
+(deliberately modified-since, not created-in-2026 and not all-open),
+watermark sync
 thereafter, targeted fetches for pipeline-referenced bugs (SRU
 verification, block-proposed) with no date filter. Next: pending-sru.json
 SRU track, sponsorship queue, trend rollups (day/week/month) over snapshot

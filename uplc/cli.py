@@ -129,8 +129,8 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("bugs-sync",
                        help="sync team bugs from Launchpad (watermarked; "
-                            "first run fetches everything open or touched "
-                            "this year)")
+                            "first run fetches everything touched this "
+                            "year)")
     _add_common(p)
     p.set_defaults(func=_cmd_bugs_sync)
 

@@ -80,12 +80,10 @@ class TestSync(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_first_sync_then_incremental(self):
-        open_entries = [
+        touched_entries = [
             _task_entry(100, "ubuntu/+source/glibc"),
             _task_entry(100, "ubuntu/noble/+source/glibc",
                         status="Fix Committed"),
-        ]
-        touched_entries = [
             _task_entry(101, "ubuntu/+source/grub2", status="Fix Released",
                         date_closed="2026-03-01T00:00:00+00:00"),
         ]
@@ -96,8 +94,7 @@ class TestSync(unittest.TestCase):
         }
         with mock.patch.object(
                 lpbugs, "search_tasks",
-                side_effect=[(open_entries, True),
-                             (touched_entries, True)]) as search, \
+                return_value=(touched_entries, True)) as search, \
              mock.patch.object(lpbugs, "_cached_json",
                                side_effect=lambda url: bugs[url]):
             result = lpbugs.sync(self.conn, "foundations-bugs")
@@ -105,10 +102,13 @@ class TestSync(unittest.TestCase):
         self.assertTrue(result.first_sync)
         self.assertEqual(result.bugs_synced, 2)
         self.assertEqual(result.watermark, "2026-06-01T00:00:00+00:00")
-        self.assertEqual(search.call_count, 2)
-        self.assertIsNone(search.call_args_list[0].kwargs.get("modified_since"))
-        self.assertEqual(search.call_args_list[1].kwargs["modified_since"],
+        # One search only: touched-since window, all statuses. Dormant
+        # open bugs are deliberately not swept.
+        self.assertEqual(search.call_count, 1)
+        self.assertEqual(search.call_args.kwargs["modified_since"],
                          lpbugs.FIRST_SYNC_SINCE)
+        self.assertEqual(search.call_args.kwargs["statuses"],
+                         lpbugs.ALL_BUG_STATUSES)
 
         rows = self.conn.execute(
             "SELECT * FROM bug_tasks WHERE bug_id = 100").fetchall()

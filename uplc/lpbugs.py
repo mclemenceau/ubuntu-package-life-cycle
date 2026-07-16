@@ -6,8 +6,12 @@ then fetched by ID through the conditional-GET cache. Pipeline-referenced
 bugs (block-proposed / update-excuse) are fetched by ID too. Never
 per-package polling.
 
-First sync is deliberately heavy — all open bugs plus everything touched
-since FIRST_SYNC_SINCE — after that every run is a watermark increment.
+First sync is deliberately heavy — every bug touched since
+FIRST_SYNC_SINCE, whatever its status — after that every run is a
+watermark increment. Bugs dormant since before that date stay out of
+scope even if still open: the team's Ubuntu backlog is tens of thousands
+of untouched bugs, and a bug with no activity in the window is not
+actionable signal for this dashboard.
 """
 
 import json
@@ -215,13 +219,11 @@ def sync(conn, team: str) -> BugSyncResult:
     result = BugSyncResult(first_sync=state is None)
 
     if state is None:
-        log.info("first sync: all open bugs + everything touched since %s "
+        log.info("first sync: every bug touched since %s, any status "
                  "(heavy, one-time)", FIRST_SYNC_SINCE)
-        entries, complete = search_tasks(team, statuses=OPEN_BUG_STATUSES)
-        more, complete2 = search_tasks(team, statuses=ALL_BUG_STATUSES,
-                                       modified_since=FIRST_SYNC_SINCE)
-        entries += more
-        result.search_complete = complete and complete2
+        entries, result.search_complete = search_tasks(
+            team, statuses=ALL_BUG_STATUSES,
+            modified_since=FIRST_SYNC_SINCE)
     else:
         since = _watermark_query_date(state["watermark"])
         log.info("incremental sync: bugs modified since %s", since)
