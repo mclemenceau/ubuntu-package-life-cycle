@@ -38,15 +38,16 @@ update-excuse) are fetched by ID regardless of subscription.
 ```console
 $ python3 -m uplc ingest            # fetch + snapshot (run from cron/timer)
 $ python3 -m uplc bugs-sync         # sync team bugs from Launchpad
+$ python3 -m uplc digest -o digests # daily curated digest (LLM-narrated)
 $ python3 -m uplc status            # funnel summary + proposed pipeline
 $ python3 -m uplc stuck --days 7    # blocked items, oldest first
 $ python3 -m uplc blockers          # migrations blocking the most packages
-$ python3 -m uplc html -o dash      # static dashboard site (4 pages)
+$ python3 -m uplc html -o dash      # static dashboard site (5 pages + feeds)
 $ python3 -m uplc serve             # serve the dashboard on localhost
 ```
 
 The dashboard is a self-contained static site (inline CSS/JS, no external
-requests) with four interconnected pages:
+requests) with five interconnected pages:
 
 - **index.html** — manager overview: tiles, funnel, proposed pipeline,
   biggest unblock opportunities.
@@ -65,6 +66,47 @@ requests) with four interconnected pages:
   closed and open-backlog charts. Bug rates come from Launchpad's own
   dates and are complete immediately; pipeline rates count observed
   snapshot transitions and sharpen as ingest history accumulates.
+- **digest.html** — blog-style archive of every daily digest, grouped by
+  month, newest open. Subscribable: the site also writes `feed.json`
+  (JSON Feed 1.1) and `feed.xml` (Atom) with the last 20 digests, so
+  teammates can follow along in any feed reader. Pass
+  `--base-url https://…` (or set `UPLC_BASE_URL`) once the site has a
+  public URL so feed entries carry clickable permalinks.
+
+## The daily digest
+
+`uplc digest` turns one day's changes into a curated Markdown briefing:
+bugs touched since the previous digest (with their fresh comments and
+activity, fetched by ID through the same conditional-GET cache) plus
+package lifecycle events derived from the snapshot history — uploads,
+migrations, merges opened/resolved, FTBFS, new autopkgtest regressions,
+and SRU task changes.
+
+The narrative is written by an LLM invoked as a subprocess. The runner
+contract is deliberately trivial so any model works: the command gets the
+prompt as its last argument and the facts JSON on stdin, and must print
+Markdown on stdout and exit 0. Default is `claude -p` (needs a prior
+interactive `claude` login for the cron user); switch with `--llm-cmd` or
+`UPLC_LLM_CMD` — e.g. `llm -m gpt-5 -s`, `gemini -p`, `ollama run
+mistral`, or `contrib/llm-anthropic-api` (a ~30-line stdlib script hitting
+the Anthropic HTTP API directly; copy it for any other vendor).
+`UPLC_LLM_TIMEOUT` caps the run (default 300s).
+
+The LLM never invents the record: it only sees a facts document, its
+output is rejected if it cites bug numbers absent from the facts, and any
+failure (offline, timeout, rejection, `--no-llm`) falls back to a
+deterministic rendering of the same facts — a cron run always publishes
+a digest. A typical crontab:
+
+```crontab
+17 6 * * *  uplc ingest && uplc bugs-sync && \
+            uplc digest -o /srv/uplc/digests && \
+            uplc html -o /srv/uplc/dash --base-url https://uplc.example.com
+```
+
+Order matters: `digest` reads the bugs-sync watermark (consecutive
+digests tile exactly, no gaps or duplicates), and `html` runs last so
+digest.html and the feeds include the new day.
 
 Default team is `foundations-bugs`; use `--team` for any team in the
 mapping. Only dependency beyond the standard library is PyYAML
@@ -104,6 +146,8 @@ not-in-devel       subscribed package absent from the devel series
 
 ## Roadmap
 
-- **SRU track**: pending-sru.json + verification-needed bug aging.
+- **SRU track**: pending-sru.json + verification-needed bug aging (the
+  digest's SRU events are currently approximated from stable-series bug
+  task changes).
 - **Sponsorship queue** annotations.
 - **Trend views**: per-day/week/month rollups over the snapshot history.

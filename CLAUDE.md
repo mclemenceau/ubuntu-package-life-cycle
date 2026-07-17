@@ -29,8 +29,10 @@ python3 -m unittest discover -s tests          # run tests
 python3 -m unittest tests.test_state -v        # run one test module
 python3 -m uplc -v ingest                      # fetch sources + snapshot (network)
 python3 -m uplc -v bugs-sync                   # sync team bugs from LP (network)
+python3 -m uplc digest -o digests              # daily digest (network + LLM;
+                                               #   --no-llm for deterministic)
 python3 -m uplc status | stuck | blockers      # terminal reports
-python3 -m uplc html -o dash | serve           # dashboard site (dir out, 3 pages)
+python3 -m uplc html -o dash | serve           # dashboard site (5 pages + feeds)
 ```
 
 Run from the repo root (or `pip install -e .` for the `uplc` entry point).
@@ -54,12 +56,21 @@ db.py         SQLite (~/.local/share/uplc/uplc.db): ingest_runs + full snapshot
               upserted current state (LP dates give retroactive history)
 kpi.py        PURE metric computations (percentages, windowed rates, backlog
               reconstruction from LP dates) — no network/DB, like state.py
+digest.py     daily curated digest: PURE parsers/event-derivation/facts/
+              fallback renderer; network only in fetch_bug_extras (by-ID
+              messages+activity via lpbugs._cached_json); the only
+              subprocess use in the codebase (LLM runner contract:
+              `<UPLC_LLM_CMD> <prompt>`, facts JSON on stdin, Markdown on
+              stdout; validated, deterministic fallback on any failure)
 report.py     terminal tables
-htmlreport.py static dashboard site: index/packages/bugs/kpi pages (PAGES
-              dict); inline CSS+JS only, degrades to plain tables without JS.
-              KPI charts are static inline SVG (native <title> tooltips).
-              Package names link to packages.html#pkg-<name> first; bug
-              numbers always link to Launchpad; filters live in URL hashes
+htmlreport.py static dashboard site: index/packages/bugs/kpi/digest pages
+              (PAGES dict) + feed.json/feed.xml (JSON Feed + Atom from
+              digest_runs); inline CSS+JS only, degrades to plain tables
+              without JS. KPI charts are static inline SVG (native <title>
+              tooltips). digest.html is a blog-style month-grouped archive
+              rendered by a small pure _md_html converter. Package names
+              link to packages.html#pkg-<name> first; bug numbers always
+              link to Launchpad; filters live in URL hashes
 cli.py        argparse subcommands
 ```
 
@@ -98,5 +109,11 @@ thereafter, targeted fetches for pipeline-referenced bugs (SRU
 verification, block-proposed) with no date filter. KPI page (kpi.html,
 2026-07-17) covers day/week/month rates: bug rates from LP dates are
 complete, pipeline rates ride the young transition history and mature
-with it. Next: pending-sru.json SRU track, sponsorship queue, richer
-trend rollups over snapshot history once it deepens.
+with it. Daily digest (2026-07-17): `uplc digest` windows tile on the
+bugs-sync watermark ((since, until], strict >), pipeline events diff the
+runs bounding the window, SRU events are approximated from stable-series
+task changes until pending-sru.json lands; digest bodies live in the
+digest_runs table so html/serve stay self-contained. Cron order:
+ingest → bugs-sync → digest → html. Next: pending-sru.json SRU track,
+sponsorship queue, richer trend rollups over snapshot history once it
+deepens.
