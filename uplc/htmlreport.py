@@ -25,14 +25,20 @@ from .report import STATE_LABELS, _age_str
 from .sources import EXCUSES_HTML
 from .state import BLOCKED_STATES, PROPOSED_STATES, STATES
 
-# Status roles (icon+label always accompany the color).
+# Status roles (icon+label always accompany the color). Severity ladder:
+# critical = fix it (red), serious = stuck on something (orange),
+# warning = action available/pending (yellow), good = healthy (green);
+# states with no entry are neutral (no action possible) and get a gray dot.
 _STATE_STATUS = {
     "blocked-build": "critical",
     "blocked-tests": "critical",
     "blocked-depends": "serious",
     "blocked-other": "serious",
     "waiting-age": "warning",
+    "merge-needed": "warning",
+    "sync-available": "warning",
     "ready-to-migrate": "good",
+    "in-sync": "good",
 }
 
 _IMPORTANCE_RANK = {
@@ -133,10 +139,12 @@ _CSS = """
 .uplc .pkg a { color: inherit; text-decoration: none;
   border-bottom: 1px dotted var(--muted); }
 .uplc .chip { white-space: nowrap; font-size: 12.5px; color: var(--ink-2); }
+.uplc .agehint { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.uplc td.bugs { white-space: nowrap; }
 .uplc .dot { display: inline-block; width: 8px; height: 8px;
   border-radius: 50%; margin-right: 6px; }
 .uplc .ver { font-family: ui-monospace, monospace; font-size: 12px;
-  color: var(--ink-2); }
+  color: var(--ink-2); overflow-wrap: anywhere; }
 .uplc .why { color: var(--ink-2); max-width: 420px; }
 .uplc .title { color: var(--ink); max-width: 460px; }
 .uplc .tag { font-size: 11px; border: 1px solid var(--border);
@@ -387,10 +395,13 @@ def _tile(label: str, value, hint: str = "") -> str:
             f'<div class="value">{value}</div>{hint_html}</div>')
 
 
-def _chip(state: str) -> str:
+def _state_color(state: str) -> str:
     status = _STATE_STATUS.get(state)
-    dot = (f'<span class="dot" style="background:var(--{status})"></span>'
-           if status else "")
+    return f"var(--{status})" if status else "var(--muted)"
+
+
+def _chip(state: str) -> str:
+    dot = f'<span class="dot" style="background:{_state_color(state)}"></span>'
     return f'<span class="chip">{dot}{_e(STATE_LABELS[state])}</span>'
 
 
@@ -486,7 +497,7 @@ def _delta_table(snaps) -> str:
         rows.append(
             "<tr>"
             f'<td class="pkg">{_pkg_anchor(s["package"])}</td>'
-            f"<td>{_e(STATE_LABELS[s['state']])}</td>"
+            f"<td>{_chip(s['state'])}</td>"
             f'<td class="ver">{_e(s["ubuntu_version"])}</td>'
             f'<td class="ver">{_e(s["debian_version"])}</td>'
             "</tr>")
@@ -627,6 +638,7 @@ def render_packages(conn: sqlite3.Connection, team: str) -> str:
 
     chips = "".join(
         f'<button class="fchip" data-state="{_e(s)}" type="button">'
+        f'<span class="dot" style="background:{_state_color(s)}"></span>'
         f"{_e(STATE_LABELS[s])} ({counts[s]})</button>"
         for s in STATES if counts.get(s))
     filters = f"""<div class="filters">
@@ -641,9 +653,8 @@ def render_packages(conn: sqlite3.Connection, team: str) -> str:
     header = ('<thead><tr>'
               '<th class="sort" data-key="pkg">Package</th>'
               '<th class="sort" data-key="statei" data-num>State</th>'
-              '<th>Ubuntu devel</th><th>Debian unstable</th><th>Proposed</th>'
-              '<th class="sort" data-key="days" data-num>Seen</th>'
               '<th class="sort" data-key="bugs" data-num>Bugs</th>'
+              '<th>Ubuntu devel</th><th>Debian unstable</th><th>Proposed</th>'
               "</tr></thead>")
     bodies = []
     for s in sorted(snaps, key=lambda r: (STATES.index(r["state"]), r["package"])):
@@ -654,12 +665,18 @@ def render_packages(conn: sqlite3.Connection, team: str) -> str:
         if not have_bugs:
             bugcell = '<span class="empty">—</span>'
         elif stats["open"]:
+            dot = ('<span class="dot" style="background:var(--critical)">'
+                   "</span>" if stats["high"] else "")
             label = str(stats["open"])
             if stats["high"]:
                 label += f" · {stats['high']} high"
-            bugcell = f'<a href="bugs.html#q={_e(pkg)}">{_e(label)}</a>'
+            bugcell = (f'{dot}<a href="bugs.html#q={_e(pkg)}">{_e(label)}</a>')
         else:
-            bugcell = "0"
+            bugcell = '<span class="empty">0</span>'
+        # Time-in-state only earns ink once it signals "stuck" (≥ 7d, the
+        # same threshold as the filter) — fresher ages live in data-days.
+        agehint = (f' <span class="agehint">{_e(_age_str(db.state_entered_at(conn, pkg)))}'
+                   "</span>" if days is not None and days >= 7 else "")
         text = " ".join([pkg, STATE_LABELS[s["state"]],
                          s["summary"] or ""]).lower()
         bodies.append(
@@ -671,14 +688,13 @@ def render_packages(conn: sqlite3.Connection, team: str) -> str:
             f' data-text="{_e(text)}">'
             "<tr>"
             f'<td class="pkg"><a href="#pkg-{_e(pkg)}">{_e(pkg)}</a></td>'
-            f"<td>{_chip(s['state'])}</td>"
+            f"<td>{_chip(s['state'])}{agehint}</td>"
+            f'<td class="num cell bugs">{bugcell}</td>'
             f'<td class="ver">{_e(s["ubuntu_version"]) or "—"}</td>'
             f'<td class="ver">{_e(s["debian_version"]) or "—"}</td>'
             f'<td class="ver">{_e(s["proposed_version"]) or ""}</td>'
-            f'<td class="num">{_e(_age_str(db.state_entered_at(conn, pkg)))}</td>'
-            f'<td class="num cell">{bugcell}</td>'
             "</tr>"
-            + _pkg_detail_row(s, detail, 7)
+            + _pkg_detail_row(s, detail, 6)
             + "</tbody>")
 
     return f"""<title>Packages — {_e(team)}</title>
