@@ -158,6 +158,28 @@ def latest_run(conn: sqlite3.Connection, team: str) -> sqlite3.Row | None:
         (team,)).fetchone()
 
 
+def first_run_at(conn: sqlite3.Connection, team: str) -> str | None:
+    row = conn.execute(
+        "SELECT MIN(ran_at) AS t FROM ingest_runs WHERE team = ?",
+        (team,)).fetchone()
+    return row["t"] if row else None
+
+
+def run_at_or_before(
+    conn: sqlite3.Connection, team: str, iso: str,
+) -> sqlite3.Row | None:
+    """Latest ingest run not newer than `iso` — for point-in-time compares."""
+    return conn.execute(
+        "SELECT * FROM ingest_runs WHERE team = ? AND ran_at <= ? "
+        "ORDER BY id DESC LIMIT 1", (team, iso)).fetchone()
+
+
+def all_transitions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT package, from_state, to_state, last_seen_old, first_seen_new"
+        " FROM transitions ORDER BY id").fetchall()
+
+
 def snapshots_for_run(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM snapshots WHERE run_id = ? ORDER BY package",

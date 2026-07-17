@@ -16,9 +16,9 @@ import html
 import json
 import sqlite3
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from . import db
+from . import db, kpi
 from .db import OPEN_BUG_STATUSES
 from .lpbugs import FIRST_SYNC_SINCE
 from .report import STATE_LABELS, _age_str
@@ -160,12 +160,24 @@ _CSS = """
 .uplc a.buglink, .uplc .cell a { color: var(--bar); text-decoration: none; }
 .uplc .empty { color: var(--muted); font-size: 13.5px; }
 .uplc footer { margin-top: 28px; color: var(--muted); font-size: 12px; }
+.uplc .tile .delta { font-size: 12px; margin-top: 2px; }
+.uplc .delta.bad, .uplc td .bad { color: var(--critical); }
+.uplc .delta.good, .uplc td .good { color: var(--good); }
+.uplc .chart svg { width: 100%; height: auto; display: block; }
+.uplc .chart svg text { font: 11px system-ui, -apple-system, sans-serif;
+  fill: var(--muted); }
+.uplc .chart .legend { margin-bottom: 8px; }
+.uplc details.tbl { margin-top: 10px; font-size: 12.5px; color: var(--ink-2); }
+.uplc details.tbl summary { cursor: pointer; color: var(--muted);
+  font-size: 12px; }
+.uplc details.tbl table { margin-top: 8px; max-width: 420px; }
 """
 
 _PAGES_NAV = [
     ("index.html", "Overview"),
     ("packages.html", "Packages"),
     ("bugs.html", "Bugs"),
+    ("kpi.html", "KPIs"),
 ]
 
 # --- Packages page script: filter/sort the tbody-per-package table. -------
@@ -389,10 +401,11 @@ def _e(text) -> str:
     return html.escape(str(text or ""))
 
 
-def _tile(label: str, value, hint: str = "") -> str:
+def _tile(label: str, value, hint: str = "", raw: str = "") -> str:
+    """One stat tile; `raw` is trusted extra HTML (e.g. a delta line)."""
     hint_html = f'<div class="hint">{_e(hint)}</div>' if hint else ""
     return (f'<div class="tile"><div class="label">{_e(label)}</div>'
-            f'<div class="value">{value}</div>{hint_html}</div>')
+            f'<div class="value">{value}</div>{hint_html}{raw}</div>')
 
 
 def _state_color(state: str) -> str:
@@ -955,10 +968,360 @@ increment.</p></div>
 """
 
 
+# --------------------------------------------------------------------------
+# KPI page (kpi.html)
+
+def _fmt_pct(p: float | None) -> str:
+    return f"{p:.0f}%" if p is not None else "—"
+
+
+def _nice_ceil(v: float) -> int:
+    """Smallest 1/2/5 × 10^k that is >= v — clean axis maximums."""
+    if v <= 1:
+        return 1
+    mag = 1
+    while True:
+        for step in (1, 2, 5):
+            if step * mag >= v:
+                return step * mag
+        mag *= 10
+
+
+def _delta_line(delta: int, period: str, up_is_bad: bool = True) -> str:
+    """Signed change vs a named period; color = direction × goodness."""
+    if delta == 0:
+        return f'<div class="delta">no change vs {_e(period)}</div>'
+    arrow, sign = ("▲", "+") if delta > 0 else ("▼", "−")
+    bad = (delta > 0) == up_is_bad
+    cls = "bad" if bad else "good"
+    return (f'<div class="delta {cls}">{arrow} {sign}{abs(delta)} '
+            f"vs {_e(period)}</div>")
+
+
+def _day_label(day) -> str:
+    return f"{day.strftime('%b')} {day.day}"
+
+
+def _column_path(x: float, y: float, w: float, h: float, color: str) -> str:
+    """A column with a 3px rounded data-end, square at the baseline."""
+    if h <= 0:
+        return ""
+    r = min(3.0, w / 2, h)
+    return (f'<path d="M{x:.1f} {y + h:.1f} V{y + r:.1f}'
+            f" Q{x:.1f} {y:.1f} {x + r:.1f} {y:.1f}"
+            f" H{x + w - r:.1f}"
+            f" Q{x + w:.1f} {y:.1f} {x + w:.1f} {y + r:.1f}"
+            f' V{y + h:.1f} Z" fill="{color}"/>')
+
+
+def _daily_bugs_chart(series: list[tuple]) -> str:
+    """Grouped columns: bugs opened vs closed per day (SVG, no JS)."""
+    if not series:
+        return ""
+    width, height, left, right, top, bottom = 960, 200, 36, 8, 12, 26
+    plot_w, plot_h = width - left - right, height - top - bottom
+    ymax = _nice_ceil(max(max(o, c) for _, o, c in series))
+    slot = plot_w / len(series)
+    bar_w = min(10.0, max(3.0, (slot - 6) / 2))
+
+    parts = []
+    ticks = [0, ymax] if ymax % 2 else [0, ymax // 2, ymax]
+    for tv in ticks:
+        y = top + plot_h * (1 - tv / ymax)
+        parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{width - right}"'
+                     f' y2="{y:.1f}" stroke="var(--grid)" stroke-width="1"/>')
+        parts.append(f'<text x="{left - 6}" y="{y + 4:.1f}"'
+                     f' text-anchor="end">{tv}</text>')
+
+    label_step = max(1, (len(series) + 5) // 6)
+    for i, (day, opened, closed) in enumerate(series):
+        x0 = left + i * slot
+        cx = x0 + (slot - (2 * bar_w + 2)) / 2
+        group = [f"<title>{_e(_day_label(day))}: {opened} opened, "
+                 f"{closed} closed</title>",
+                 f'<rect x="{x0:.1f}" y="{top}" width="{slot:.1f}"'
+                 f' height="{plot_h}" fill="transparent"/>']
+        for offset, value, color in (
+                (0, opened, "var(--bar)"),
+                (bar_w + 2, closed, "var(--bar2)")):
+            h = plot_h * value / ymax
+            group.append(_column_path(cx + offset, top + plot_h - h,
+                                      bar_w, h, color))
+        parts.append(f"<g>{''.join(group)}</g>")
+        if i % label_step == 0:
+            parts.append(f'<text x="{x0 + slot / 2:.1f}" y="{height - 8}"'
+                         f' text-anchor="middle">{_e(_day_label(day))}</text>')
+
+    rows = "".join(
+        f'<tr><td>{_e(_day_label(d))}</td><td class="num">{o}</td>'
+        f'<td class="num">{c}</td></tr>'
+        for d, o, c in series if o or c)
+    table = ('<details class="tbl"><summary>Data table (days with '
+             "activity)</summary><table><tr><th>Day</th><th>Opened</th>"
+             f"<th>Closed</th></tr>{rows}</table></details>") if rows else ""
+    return f"""<div class="card chart">
+<div class="legend">
+<span><span class="sw" style="background:var(--bar)"></span>opened</span>
+<span><span class="sw" style="background:var(--bar2)"></span>closed</span>
+</div>
+<svg viewBox="0 0 {width} {height}" role="img"
+ aria-label="Bugs opened and closed per day">{''.join(parts)}</svg>
+{table}</div>"""
+
+
+def _backlog_chart(series: list[tuple]) -> str:
+    """Open-backlog line over time (SVG, no JS)."""
+    if not series:
+        return ""
+    width, height, left, right, top, bottom = 960, 200, 44, 46, 14, 26
+    plot_w, plot_h = width - left - right, height - top - bottom
+    values = [v for _, v in series]
+    lo, hi = min(values), max(values)
+    step = _nice_ceil(max(1, (hi - lo + 2) / 4))
+    y0 = (lo // step) * step
+    y1 = y0 + step * max(1, -(-(hi - y0) // step))
+    if y1 == hi:
+        y1 += step  # headroom so the line never rides the frame
+
+    def sx(i):
+        return left + plot_w * i / max(1, len(series) - 1)
+
+    def sy(v):
+        return top + plot_h * (1 - (v - y0) / (y1 - y0))
+
+    parts = []
+    for tv in range(y0, y1 + 1, step):
+        y = sy(tv)
+        parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{width - right}"'
+                     f' y2="{y:.1f}" stroke="var(--grid)" stroke-width="1"/>')
+        parts.append(f'<text x="{left - 6}" y="{y + 4:.1f}"'
+                     f' text-anchor="end">{tv}</text>')
+
+    pts = " ".join(f"{sx(i):.1f},{sy(v):.1f}"
+                   for i, (_, v) in enumerate(series))
+    if y0 == 0:
+        parts.append(f'<polygon points="{left},{top + plot_h} {pts} '
+                     f'{width - right},{top + plot_h}" fill="var(--bar)"'
+                     ' opacity="0.1"/>')
+    parts.append(f'<polyline points="{pts}" fill="none" stroke="var(--bar)"'
+                 ' stroke-width="2" stroke-linejoin="round"'
+                 ' stroke-linecap="round"/>')
+
+    label_step = max(1, (len(series) + 4) // 5)
+    for i, (day, v) in enumerate(series):
+        parts.append(f'<circle cx="{sx(i):.1f}" cy="{sy(v):.1f}" r="10"'
+                     ' fill="transparent">'
+                     f"<title>{_e(_day_label(day))}: {v} open</title>"
+                     "</circle>")
+        if i % label_step == 0 and i < len(series) - 1:
+            parts.append(f'<text x="{sx(i):.1f}" y="{height - 8}"'
+                         f' text-anchor="middle">{_e(_day_label(day))}</text>')
+
+    end_day, end_v = series[-1]
+    parts.append(f'<circle cx="{sx(len(series) - 1):.1f}"'
+                 f' cy="{sy(end_v):.1f}" r="4.5" fill="var(--bar)"'
+                 ' stroke="var(--surface)" stroke-width="2"/>')
+    parts.append(f'<text x="{sx(len(series) - 1) + 8:.1f}"'
+                 f' y="{sy(end_v) + 4:.1f}" fill="var(--ink)"'
+                 f' font-weight="600">{end_v}</text>')
+
+    weekly = series[::-1][::7][::-1]  # every 7th day, ending today
+    rows = "".join(f'<tr><td>{_e(_day_label(d))}</td>'
+                   f'<td class="num">{v}</td></tr>' for d, v in weekly)
+    return f"""<div class="card chart">
+<svg viewBox="0 0 {width} {height}" role="img"
+ aria-label="Open bug backlog over time">{''.join(parts)}</svg>
+<details class="tbl"><summary>Data table (weekly)</summary>
+<table><tr><th>Day</th><th>Open bugs</th></tr>{rows}</table></details></div>"""
+
+
+def _rates_table(bugs: list[dict], transitions: list[dict],
+                 now: datetime, history_start: str) -> str:
+    rows = []
+    for label, days in kpi.WINDOWS:
+        br = kpi.bug_window_rates(bugs, now, days) if bugs else None
+        tr = kpi.transition_window_rates(transitions, now, days)
+
+        def _per_day(n):
+            if days == 1:
+                return f'<td class="num">{n}</td>'
+            return (f'<td class="num">{n} <span class="agehint">'
+                    f"({n / days:.1f}/d)</span></td>")
+
+        if br is None:
+            bugcells = '<td class="num">—</td>' * 3
+        else:
+            net = br["net"]
+            if net > 0:
+                netcell = f'<span class="bad">▲ +{net}</span>'
+            elif net < 0:
+                netcell = f'<span class="good">▼ −{-net}</span>'
+            else:
+                netcell = "0"
+            bugcells = (_per_day(br["opened"]) + _per_day(br["closed"])
+                        + f'<td class="num">{netcell}</td>')
+        rows.append(
+            f'<tr><td>{_e(label)} <span class="agehint">last {days}d</span>'
+            f"</td>{bugcells}"
+            f'<td class="num">{tr["changes"]}</td>'
+            f'<td class="num">{tr["migrated"]}</td>'
+            f'<td class="num">{tr["entered"]}</td></tr>')
+    note = ("Bug columns come from Launchpad's own dates, so they are "
+            "complete. Pipeline columns count state changes observed "
+            f"between ingest runs — history begins {history_start[:10]} "
+            "and these rates mature as runs accumulate.")
+    return ('<div class="card scroll"><table>'
+            "<tr><th>Window</th><th>Bugs opened</th><th>Bugs closed</th>"
+            "<th>Net backlog</th><th>Pipeline changes</th>"
+            "<th>Migrated out</th><th>Entered -proposed</th></tr>"
+            + "".join(rows) + "</table></div>"
+            f'<p class="empty">{_e(note)}</p>')
+
+
+def _levels_table(conn: sqlite3.Connection, team: str,
+                  bugs: list[dict], now: datetime) -> str:
+    """Stock levels now vs 1/7/30 days ago (missing history shows —)."""
+    columns = [("now", 0), ("1d ago", 1), ("7d ago", 7), ("30d ago", 30)]
+    per_col = []
+    for _, days in columns:
+        when = now - timedelta(days=days)
+        iso = when.strftime("%Y-%m-%dT%H:%M:%SZ")
+        run = db.run_at_or_before(conn, team, iso)
+        pk = None
+        if run is not None:
+            counts = Counter(
+                s["state"] for s in db.snapshots_for_run(conn, run["id"]))
+            pk = kpi.package_kpis(counts)
+        backlog = kpi.open_backlog_at(bugs, when) if bugs else None
+        per_col.append((pk, backlog))
+
+    def row(label, getter):
+        cells = ""
+        for pk, backlog in per_col:
+            v = getter(pk, backlog)
+            cells += f'<td class="num">{v if v is not None else "—"}</td>'
+        return f"<tr><td>{_e(label)}</td>{cells}</tr>"
+
+    rows = [
+        row("In -proposed", lambda pk, b: pk and pk["in_proposed"]),
+        row("Blocked", lambda pk, b: pk and pk["blocked"]),
+        row("Behind Debian", lambda pk, b: pk and pk["behind"]),
+        row("Current vs Debian", lambda pk, b: pk and pk["current"]),
+    ]
+    if bugs:
+        rows.append(row("Open bugs", lambda pk, b: b))
+    heads = "".join(f"<th>{_e(label)}</th>" for label, _ in columns)
+    return ('<div class="card scroll"><table>'
+            f"<tr><th></th>{heads}</tr>" + "".join(rows) + "</table></div>"
+            '<p class="empty">Pipeline levels come from stored snapshots; '
+            "columns older than the local history show —. Open bugs are "
+            "reconstructed from Launchpad dates.</p>")
+
+
+def render_kpi(conn: sqlite3.Connection, team: str) -> str:
+    run, snaps = _latest(conn, team)
+    now = datetime.now(timezone.utc)
+    counts = Counter(s["state"] for s in snaps)
+    pk = kpi.package_kpis(counts)
+
+    bugs = _aggregate_bugs(conn)
+    transitions = [dict(t) for t in db.all_transitions(conn)]
+    history_start = db.first_run_at(conn, team) or run["ran_at"]
+
+    stuck = sum(
+        1 for s in snaps if s["state"] in PROPOSED_STATES
+        and (d := _days_since(db.state_entered_at(conn, s["package"])))
+        is not None and d >= 7)
+    pkg_tiles = "".join([
+        _tile("Current vs Debian", _fmt_pct(pk["current_pct"]),
+              f"{pk['current']} of {pk['total']}, incl. Ubuntu-only"),
+        _tile("Behind Debian", _fmt_pct(pk["behind_pct"]),
+              f"{counts.get('merge-needed', 0)} merges, "
+              f"{counts.get('sync-available', 0)} syncs"),
+        _tile("In -proposed", _fmt_pct(pk["proposed_pct"]),
+              f"{pk['in_proposed']} packages"),
+        _tile("Blocked share of -proposed",
+              _fmt_pct(pk["blocked_of_proposed_pct"]),
+              f"{pk['blocked']} of {pk['in_proposed']} in -proposed"),
+        _tile("Stuck ≥ 7d in -proposed", stuck,
+              f"{_fmt_pct(kpi.pct(stuck, pk['in_proposed']))} of -proposed"),
+    ])
+
+    if bugs:
+        bk = kpi.bug_kpis(bugs, now)
+        conc = kpi.bug_concentration(bugs)
+        month = kpi.bug_window_rates(bugs, now, 30)
+        backlog_7d = kpi.open_backlog_at(bugs, now - timedelta(days=7))
+        fix_rate = kpi.pct(month["closed"], month["opened"])
+        team_pkgs = {s["package"] for s in snaps}
+        pkgs_with = sum(1 for p, _ in db.open_bug_counts(conn).items()
+                        if p in team_pkgs)
+        med = bk["median_age_days"]
+        bug_tiles = "".join([
+            _tile("Open bugs", bk["open"], "the synced backlog",
+                  _delta_line(bk["open"] - backlog_7d, "7d ago")),
+            _tile("Triaged", _fmt_pct(bk["triaged_pct"]),
+                  f"{bk['triaged']} of {bk['open']} open"),
+            _tile("Assigned", _fmt_pct(bk["assigned_pct"]),
+                  f"{bk['assigned']} of {bk['open']} open"),
+            _tile("Critical / High", _fmt_pct(bk["high_pct"]),
+                  f"{bk['high']} of {bk['open']} open"),
+            _tile("Active last 30d", _fmt_pct(bk["active_pct"]),
+                  f"{bk['active']} of {bk['open']} open touched"),
+            _tile("Fix rate, 30d", _fmt_pct(fix_rate),
+                  f"{month['closed']} closed / {month['opened']} opened"),
+            _tile("Median open age",
+                  f"{med:.0f}d" if med is not None else "—",
+                  "of open bugs, from LP created dates"),
+            _tile("Packages with open bugs",
+                  _fmt_pct(kpi.pct(pkgs_with, pk["total"])),
+                  f"{pkgs_with} of {pk['total']} team packages"),
+            _tile("Top 5 packages hold", _fmt_pct(conc["share_pct"]),
+                  "of open bugs — " + ", ".join(
+                      p for p, _ in conc["leaders"][:3])),
+        ])
+        bug_section = f"<h2>Bug health</h2>\n<div class=\"tiles\">{bug_tiles}</div>"
+        charts = (
+            "<h2>Bugs opened vs closed — last 30 days</h2>\n"
+            + _daily_bugs_chart(kpi.daily_bug_series(bugs, 30, now))
+            + "\n<h2>Open bug backlog — last 90 days</h2>\n"
+            + _backlog_chart(kpi.backlog_series(bugs, 90, now))
+            + '\n<p class="empty">Backlog counts the synced set (bugs '
+              f"touched since {FIRST_SYNC_SINCE}); dormant older bugs are "
+              "deliberately out of scope.</p>")
+    else:
+        bug_section = ('<h2>Bug health</h2>\n<div class="card">'
+                       '<p class="empty">No bug data yet — run '
+                       "<code>uplc bugs-sync</code> to add bug KPIs, rates "
+                       "and trend charts to this page.</p></div>")
+        charts = ""
+
+    return f"""<title>KPIs — {_e(team)}</title>
+<style>{_CSS}</style>
+<div class="uplc"><div class="wrap">
+{_nav('kpi.html')}
+<h1>KPIs — {_e(team)}</h1>
+<div class="meta">{_e(run['series'])} series · snapshot {_e(run['ran_at'])}
+ · pipeline history since {_e(history_start[:10])} — rates sharpen as
+ ingest runs accumulate</div>
+<h2>Package set health</h2>
+<div class="tiles">{pkg_tiles}</div>
+{bug_section}
+<h2>Rate of change</h2>
+{_rates_table(bugs, transitions, now, history_start)}
+<h2>Levels — now vs then</h2>
+{_levels_table(conn, team, bugs, now)}
+{charts}
+{_footer()}
+</div></div>
+"""
+
+
 PAGES = {
     "index.html": render_index,
     "packages.html": render_packages,
     "bugs.html": render_bugs,
+    "kpi.html": render_kpi,
 }
 
 # Backwards-compatible name for the single-page overview.

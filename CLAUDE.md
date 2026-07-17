@@ -52,9 +52,12 @@ lpbugs.py     watermarked LP bug sync (searchTasks + by-ID fetches) and the
 db.py         SQLite (~/.local/share/uplc/uplc.db): ingest_runs + full snapshot
               per run + derived transitions rows; bugs/bug_tasks/bug_sync are
               upserted current state (LP dates give retroactive history)
+kpi.py        PURE metric computations (percentages, windowed rates, backlog
+              reconstruction from LP dates) — no network/DB, like state.py
 report.py     terminal tables
-htmlreport.py static dashboard site: index/packages/bugs pages (PAGES dict);
-              inline CSS+JS only, degrades to plain tables without JS.
+htmlreport.py static dashboard site: index/packages/bugs/kpi pages (PAGES
+              dict); inline CSS+JS only, degrades to plain tables without JS.
+              KPI charts are static inline SVG (native <title> tooltips).
               Package names link to packages.html#pkg-<name> first; bug
               numbers always link to Launchpad; filters live in URL hashes
 cli.py        argparse subcommands
@@ -92,6 +95,8 @@ dashboard pages). Bug scope: everything touched since 2026-01-01
 (deliberately modified-since, not created-in-2026 and not all-open),
 watermark sync
 thereafter, targeted fetches for pipeline-referenced bugs (SRU
-verification, block-proposed) with no date filter. Next: pending-sru.json
-SRU track, sponsorship queue, trend rollups (day/week/month) over snapshot
-history.
+verification, block-proposed) with no date filter. KPI page (kpi.html,
+2026-07-17) covers day/week/month rates: bug rates from LP dates are
+complete, pipeline rates ride the young transition history and mature
+with it. Next: pending-sru.json SRU track, sponsorship queue, richer
+trend rollups over snapshot history once it deepens.

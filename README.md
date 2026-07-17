@@ -41,12 +41,12 @@ $ python3 -m uplc bugs-sync         # sync team bugs from Launchpad
 $ python3 -m uplc status            # funnel summary + proposed pipeline
 $ python3 -m uplc stuck --days 7    # blocked items, oldest first
 $ python3 -m uplc blockers          # migrations blocking the most packages
-$ python3 -m uplc html -o dash      # static dashboard site (3 pages)
+$ python3 -m uplc html -o dash      # static dashboard site (4 pages)
 $ python3 -m uplc serve             # serve the dashboard on localhost
 ```
 
 The dashboard is a self-contained static site (inline CSS/JS, no external
-requests) with three interconnected pages:
+requests) with four interconnected pages:
 
 - **index.html** — manager overview: tiles, funnel, proposed pipeline,
   biggest unblock opportunities.
@@ -59,6 +59,12 @@ requests) with three interconnected pages:
   untriaged, unassigned, stale, gating). Bug numbers always link to
   Launchpad. Filters are reflected in the URL hash, so filtered views are
   shareable (e.g. `bugs.html#q=glibc`).
+- **kpi.html** — set-health metrics: package and bug percentages (in sync,
+  blocked share, triaged, assigned, fix rate, concentration), daily/weekly/
+  monthly rates of change, levels now vs 1/7/30 days ago, and opened-vs-
+  closed and open-backlog charts. Bug rates come from Launchpad's own
+  dates and are complete immediately; pipeline rates count observed
+  snapshot transitions and sharpen as ingest history accumulates.
 
 Default team is `foundations-bugs`; use `--team` for any team in the
 mapping. Only dependency beyond the standard library is PyYAML

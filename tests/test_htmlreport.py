@@ -52,7 +52,8 @@ class TestRenderPages(unittest.TestCase):
 
     def test_pages_registry_covers_the_site(self):
         self.assertEqual(list(htmlreport.PAGES),
-                         ["index.html", "packages.html", "bugs.html"])
+                         ["index.html", "packages.html", "bugs.html",
+                          "kpi.html"])
 
     def test_index_links_packages_internally(self):
         page = htmlreport.render_index(self.conn, "foundations-bugs")
@@ -88,6 +89,25 @@ class TestRenderPages(unittest.TestCase):
     def test_bugs_page_empty_state(self):
         page = htmlreport.render_bugs(self.conn, "foundations-bugs")
         self.assertIn("No bug data yet", page)
+
+    def test_kpi_page_with_bug_data(self):
+        _seed_bugs(self.conn)
+        page = htmlreport.render_kpi(self.conn, "foundations-bugs")
+        self.assertIn("Package set health", page)
+        self.assertIn("Bug health", page)
+        # 1 of 3 packages is in sync -> 33%.
+        self.assertIn("33%", page)
+        self.assertIn("Rate of change", page)
+        self.assertIn("now vs then", page)
+        # Both SVG charts render with their table twins.
+        self.assertEqual(page.count("<svg"), 2)
+        self.assertIn("Data table", page)
+
+    def test_kpi_page_without_bug_data(self):
+        page = htmlreport.render_kpi(self.conn, "foundations-bugs")
+        self.assertIn("bugs-sync", page)
+        self.assertIn("Rate of change", page)
+        self.assertNotIn("<svg", page)
 
 
 if __name__ == "__main__":
