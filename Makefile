@@ -5,13 +5,14 @@ PORT ?= 8321
 DAYS ?= 0
 DB ?= $(or $(UPLC_DB),$(or $(XDG_DATA_HOME),$(HOME)/.local/share)/uplc/uplc.db)
 
-.PHONY: help install test ingest bugs-sync refresh status stuck blockers html serve db clean
+.PHONY: help install test ci ingest bugs-sync refresh status stuck blockers html serve db clean
 
 help:
 	@echo "uplc — Ubuntu Package Life Cycle"
 	@echo ""
 	@echo "  make install   pip install -e . (adds the uplc entry point)"
 	@echo "  make test      run the unit test suite"
+	@echo "  make ci        reproduce the GitHub Actions CI job locally"
 	@echo "  make ingest    fetch sources + snapshot current state (network)"
 	@echo "  make bugs-sync sync team bugs from Launchpad (network; first run heavy)"
 	@echo "  make refresh   ingest + bugs-sync, in that order"
@@ -31,6 +32,16 @@ install:
 
 test:
 	$(PYTHON) -m unittest discover -s tests
+
+# Mirrors .github/workflows/ci.yml (minus the version matrix): CI installs
+# with pip, but this box runs stock system Python with PyYAML from apt, no
+# pip — so check the dependency directly instead of via `pip install -e .`,
+# and exercise the package the same no-install way every other target here
+# does. Catches the same regressions without needing pip present.
+ci:
+	$(PYTHON) -c "import yaml" || (echo "PyYAML missing — apt install python3-yaml, or pip install PyYAML" >&2; exit 1)
+	$(PYTHON) -m unittest discover -s tests -v
+	$(PYTHON) -m uplc --help
 
 ingest:
 	$(PYTHON) -m uplc -v ingest --team $(TEAM)
