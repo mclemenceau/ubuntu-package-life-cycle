@@ -14,9 +14,11 @@ anywhere goes straight to Launchpad.
 
 import html
 import json
+import re
 import sqlite3
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from xml.sax.saxutils import escape as _xml_escape
 
 from . import db, kpi
 from .db import OPEN_BUG_STATUSES
@@ -171,6 +173,21 @@ _CSS = """
 .uplc details.tbl summary { cursor: pointer; color: var(--muted);
   font-size: 12px; }
 .uplc details.tbl table { margin-top: 8px; max-width: 420px; }
+.uplc .subscribe { background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 16px; font-size: 13px;
+  color: var(--ink-2); margin-bottom: 20px; }
+.uplc .digest-md { max-width: 760px; }
+.uplc .digest-md h1 { font-size: 18px; margin: 8px 0; }
+.uplc .digest-md h2 { font-size: 15px; }
+.uplc .digest-md h3 { font-size: 14px; font-weight: 600; margin: 18px 0 6px; }
+.uplc .digest-md blockquote { margin: 8px 0; padding: 2px 12px;
+  border-left: 3px solid var(--bar2); color: var(--ink-2); }
+.uplc .digest-md .scroll { overflow-x: auto; }
+.uplc details.digest { margin: 6px 0; }
+.uplc details.digest summary { cursor: pointer; font-size: 14px;
+  padding: 4px 0; }
+.uplc details.digest .digest-md { border-left: 2px solid var(--grid);
+  padding-left: 16px; margin: 6px 0 14px; }
 """
 
 _PAGES_NAV = [
@@ -178,6 +195,7 @@ _PAGES_NAV = [
     ("packages.html", "Packages"),
     ("bugs.html", "Bugs"),
     ("kpi.html", "KPIs"),
+    ("digest.html", "Digest"),
 ]
 
 # --- Packages page script: filter/sort the tbody-per-package table. -------
@@ -1317,11 +1335,249 @@ def render_kpi(conn: sqlite3.Connection, team: str) -> str:
 """
 
 
+# --------------------------------------------------------------------------
+# Digest page (digest.html) — blog-style archive of stored digests + feeds
+
+_MD_CODE = re.compile(r"`([^`]+)`")
+_MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_MD_ITALIC = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)")
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+_MD_LIST_ITEM = re.compile(r"(?:[-*]|\d+\.) (.*)")
+_MD_TABLE_SEP = re.compile(r":?-+:?")
+
+
+def _md_inline(text: str) -> str:
+    out = _e(text)
+    out = _MD_CODE.sub(r"<code>\1</code>", out)
+    out = _MD_BOLD.sub(r"<strong>\1</strong>", out)
+    out = _MD_ITALIC.sub(r"<em>\1</em>", out)
+    out = _MD_LINK.sub(r'<a href="\2">\1</a>', out)
+    return out
+
+
+def _md_html(md: str) -> str:
+    """Markdown → HTML for the digest subset (pure, stdlib only).
+
+    Headings, hr, blockquotes, pipe tables, flat lists, inline
+    bold/italic/code/links. Anything unrecognized degrades to a
+    paragraph — content is never dropped. Input is escaped before the
+    inline pass, so only generated tags reach the page.
+    """
+    out: list[str] = []
+    para: list[str] = []
+    lines = md.splitlines()
+
+    def flush():
+        if para:
+            out.append("<p>" + " ".join(_md_inline(x) for x in para) + "</p>")
+            para.clear()
+
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if not s:
+            flush()
+            i += 1
+        elif s.startswith("### "):
+            flush()
+            out.append(f"<h3>{_md_inline(s[4:])}</h3>")
+            i += 1
+        elif s.startswith("## "):
+            flush()
+            out.append(f"<h2>{_md_inline(s[3:])}</h2>")
+            i += 1
+        elif s.startswith("# "):
+            flush()
+            out.append(f"<h1>{_md_inline(s[2:])}</h1>")
+            i += 1
+        elif s in ("---", "***"):
+            flush()
+            out.append("<hr>")
+            i += 1
+        elif s.startswith(">"):
+            flush()
+            quote = []
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                quote.append(lines[i].strip().lstrip(">").strip())
+                i += 1
+            inner = " ".join(_md_inline(q) for q in quote if q)
+            out.append(f"<blockquote><p>{inner}</p></blockquote>")
+        elif s.startswith("|"):
+            flush()
+            rows = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = [c.strip()
+                         for c in lines[i].strip().strip("|").split("|")]
+                rows.append(cells)
+                i += 1
+            header = None
+            body = rows
+            if len(rows) >= 2 and all(
+                    _MD_TABLE_SEP.fullmatch(c) for c in rows[1]):
+                header, body = rows[0], rows[2:]
+            parts = ['<div class="scroll"><table>']
+            if header:
+                parts.append("<tr>" + "".join(
+                    f"<th>{_md_inline(c)}</th>" for c in header) + "</tr>")
+            for r in body:
+                parts.append("<tr>" + "".join(
+                    f"<td>{_md_inline(c)}</td>" for c in r) + "</tr>")
+            parts.append("</table></div>")
+            out.append("".join(parts))
+        elif _MD_LIST_ITEM.match(s):
+            flush()
+            tag = "ol" if s[0].isdigit() else "ul"
+            items = []
+            while i < len(lines):
+                m = _MD_LIST_ITEM.match(lines[i].strip())
+                if not m:
+                    break
+                items.append(f"<li>{_md_inline(m.group(1))}</li>")
+                i += 1
+            out.append(f"<{tag}>{''.join(items)}</{tag}>")
+        else:
+            para.append(s)
+            i += 1
+    flush()
+    return "".join(out)
+
+
+# Open the <details> a feed permalink points at; degrades to plain anchors.
+_DIGEST_JS = """
+(function () {
+  function reveal() {
+    var el = document.getElementById(location.hash.slice(1));
+    if (el && el.tagName === 'DETAILS') el.open = true;
+  }
+  window.addEventListener('hashchange', reveal);
+  reveal();
+})();
+"""
+
+
+def _digest_summary(row) -> str:
+    d = datetime.strptime(row["date"], "%Y-%m-%d")
+    label = f"{d.strftime('%A')} {d.day} {d.strftime('%B')}"
+    note = "" if row["used_llm"] else " · deterministic"
+    return f"{label} — {row['bug_count'] or 0} bugs{note}"
+
+
+def render_digest(conn: sqlite3.Connection, team: str) -> str:
+    rows = db.digest_runs(conn, team)
+    if not rows:
+        body = ('<p class="empty">no digests yet — run '
+                "<code>uplc digest</code> after a bugs-sync</p>")
+    else:
+        chunks = []
+        month = None
+        for idx, row in enumerate(rows):
+            if row["date"][:7] != month:
+                month = row["date"][:7]
+                label = datetime.strptime(month, "%Y-%m").strftime("%B %Y")
+                chunks.append(f"<h2>{_e(label)}</h2>")
+            anchor = f"digest-{_e(row['date'])}"
+            article = (f'<article class="digest-md">'
+                       f"{_md_html(row['body'] or '')}</article>")
+            if idx == 0:
+                chunks.append(f'<div id="{anchor}">{article}</div>')
+            else:
+                chunks.append(
+                    f'<details class="digest" id="{anchor}">'
+                    f"<summary>{_e(_digest_summary(row))}</summary>"
+                    f"{article}</details>")
+        body = "".join(chunks)
+    return f"""<title>Digest — {_e(team)}</title>
+<style>{_CSS}</style>
+<div class="uplc"><div class="wrap">
+{_nav('digest.html')}
+<h1>Daily digest — {_e(team)}</h1>
+<div class="subscribe">Subscribe: point a feed reader at
+ <a href="feed.json">feed.json</a> (JSON&nbsp;Feed) or
+ <a href="feed.xml">feed.xml</a> (Atom); new digests appear on every
+ publish. Each entry links back to its spot on this page.</div>
+{body}
+{_footer("Digest narratives are LLM-assisted from a facts document; "
+         "the summary tables and links come straight from the data.")}
+</div></div>
+<script>{_DIGEST_JS}</script>
+"""
+
+
+_FEED_LIMIT = 20
+
+
+def _tag_uri(team: str, date: str) -> str:
+    # Base-URL-independent, stable entry ids: feeds validate even before
+    # the dashboard has a public URL.
+    return f"tag:uplc.local,2026:{team}:digest-{date}"
+
+
+def render_feed_json(conn: sqlite3.Connection, team: str,
+                     base_url: str = "") -> str:
+    base = base_url.rstrip("/")
+    items = []
+    for row in db.digest_runs(conn, team, limit=_FEED_LIMIT):
+        item = {
+            "id": _tag_uri(team, row["date"]),
+            "title": f"{team} bugs digest — {row['date']}",
+            "date_published": row["ran_at"],
+            "content_html": _md_html(row["body"] or ""),
+        }
+        if base:
+            item["url"] = f"{base}/digest.html#digest-{row['date']}"
+        items.append(item)
+    feed = {
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": f"{team} bugs digest",
+        "description": "Daily curated digest of team bug activity and "
+                       "package pipeline events, generated by uplc.",
+        "items": items,
+    }
+    if base:
+        feed["home_page_url"] = f"{base}/digest.html"
+        feed["feed_url"] = f"{base}/feed.json"
+    return json.dumps(feed, indent=1)
+
+
+def render_feed_atom(conn: sqlite3.Connection, team: str,
+                     base_url: str = "") -> str:
+    base = base_url.rstrip("/")
+    rows = db.digest_runs(conn, team, limit=_FEED_LIMIT)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    updated = rows[0]["ran_at"] if rows else now
+    entries = []
+    for row in rows:
+        title = f"{team} bugs digest — {row['date']}"
+        link = (f'<link href="{_xml_escape(base)}/digest.html'
+                f'#digest-{row["date"]}"/>' if base else "")
+        entries.append(
+            "<entry>"
+            f"<id>{_xml_escape(_tag_uri(team, row['date']))}</id>"
+            f"<title>{_xml_escape(title)}</title>"
+            f"<updated>{_xml_escape(row['ran_at'])}</updated>"
+            f"{link}"
+            f'<content type="html">'
+            f"{_xml_escape(_md_html(row['body'] or ''))}</content>"
+            "</entry>")
+    self_link = (f'<link rel="self" href="{_xml_escape(base)}/feed.xml"/>'
+                 if base else "")
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<feed xmlns="http://www.w3.org/2005/Atom">'
+        f"<id>{_xml_escape(_tag_uri(team, 'feed'))}</id>"
+        f"<title>{_xml_escape(team)} bugs digest</title>"
+        f"<updated>{_xml_escape(updated)}</updated>"
+        f"{self_link}"
+        f"{''.join(entries)}"
+        "</feed>")
+
+
 PAGES = {
     "index.html": render_index,
     "packages.html": render_packages,
     "bugs.html": render_bugs,
     "kpi.html": render_kpi,
+    "digest.html": render_digest,
 }
 
 # Backwards-compatible name for the single-page overview.

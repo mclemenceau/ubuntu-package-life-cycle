@@ -1,4 +1,6 @@
+import json
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from uplc import db, htmlreport
@@ -53,7 +55,7 @@ class TestRenderPages(unittest.TestCase):
     def test_pages_registry_covers_the_site(self):
         self.assertEqual(list(htmlreport.PAGES),
                          ["index.html", "packages.html", "bugs.html",
-                          "kpi.html"])
+                          "kpi.html", "digest.html"])
 
     def test_index_links_packages_internally(self):
         page = htmlreport.render_index(self.conn, "foundations-bugs")
@@ -108,6 +110,105 @@ class TestRenderPages(unittest.TestCase):
         self.assertIn("bugs-sync", page)
         self.assertIn("Rate of change", page)
         self.assertNotIn("<svg", page)
+
+
+class TestMdHtml(unittest.TestCase):
+    def test_headings_hr_and_inline(self):
+        out = htmlreport._md_html(
+            "# Top\n\n## Sub\n\n---\n\n**bold** and *it* and `code` and "
+            "[a link](https://example.com/x)")
+        self.assertIn("<h1>Top</h1>", out)
+        self.assertIn("<h2>Sub</h2>", out)
+        self.assertIn("<hr>", out)
+        self.assertIn("<strong>bold</strong>", out)
+        self.assertIn("<em>it</em>", out)
+        self.assertIn("<code>code</code>", out)
+        self.assertIn('<a href="https://example.com/x">a link</a>', out)
+
+    def test_table_blockquote_list(self):
+        out = htmlreport._md_html(
+            "| Bug | Status |\n|---|---|\n| #1 | New |\n\n"
+            "> a note\n> continued\n\n- one\n- two")
+        self.assertIn("<th>Bug</th>", out)
+        self.assertIn("<td>New</td>", out)
+        self.assertNotIn("---", out)  # separator row consumed
+        self.assertIn("<blockquote><p>a note continued</p></blockquote>", out)
+        self.assertIn("<li>one</li>", out)
+
+    def test_html_is_escaped(self):
+        out = htmlreport._md_html("hello <script>alert(1)</script>")
+        self.assertNotIn("<script>", out)
+        self.assertIn("&lt;script&gt;", out)
+
+    def test_unknown_lines_degrade_to_paragraphs(self):
+        out = htmlreport._md_html("just text\nmore text")
+        self.assertIn("<p>just text more text</p>", out)
+
+
+def _seed_digests(conn):
+    for date, month_body in (("2026-06-30", "june digest"),
+                             ("2026-07-16", "# 🐛 digest\nold day"),
+                             ("2026-07-17", "# 🐛 digest\n**newest**")):
+        db.record_digest_run(
+            conn, team="foundations-bugs", since_iso="s", until_iso="u",
+            date=date, bug_count=3, used_llm=True, body=month_body)
+
+
+class TestDigestPage(unittest.TestCase):
+    def setUp(self):
+        self.conn = db.connect(Path(":memory:"))
+
+    def test_empty_state(self):
+        page = htmlreport.render_digest(self.conn, "foundations-bugs")
+        self.assertIn("no digests yet", page)
+
+    def test_archive_grouping_anchors_and_subscribe(self):
+        _seed_digests(self.conn)
+        page = htmlreport.render_digest(self.conn, "foundations-bugs")
+        self.assertIn("<h2>July 2026</h2>", page)
+        self.assertIn("<h2>June 2026</h2>", page)
+        # Newest is open, older days collapse behind <details>.
+        self.assertIn('<div id="digest-2026-07-17">', page)
+        self.assertIn('<details class="digest" id="digest-2026-07-16">', page)
+        self.assertIn("Thursday 16 July — 3 bugs", page)
+        self.assertIn("<strong>newest</strong>", page)
+        self.assertIn('href="feed.json"', page)
+        self.assertIn('href="feed.xml"', page)
+
+    def test_feed_json_valid_and_stable_ids(self):
+        _seed_digests(self.conn)
+        feed = json.loads(htmlreport.render_feed_json(
+            self.conn, "foundations-bugs", "https://example.com/dash"))
+        self.assertEqual(feed["version"], "https://jsonfeed.org/version/1.1")
+        self.assertEqual(len(feed["items"]), 3)
+        newest = feed["items"][0]
+        self.assertEqual(
+            newest["id"],
+            "tag:uplc.local,2026:foundations-bugs:digest-2026-07-17")
+        self.assertEqual(
+            newest["url"],
+            "https://example.com/dash/digest.html#digest-2026-07-17")
+        self.assertIn("<strong>newest</strong>", newest["content_html"])
+
+    def test_feed_json_without_base_url(self):
+        _seed_digests(self.conn)
+        feed = json.loads(
+            htmlreport.render_feed_json(self.conn, "foundations-bugs"))
+        self.assertNotIn("url", feed["items"][0])
+        self.assertNotIn("feed_url", feed)
+
+    def test_feed_atom_parses_and_escapes(self):
+        db.record_digest_run(
+            self.conn, team="foundations-bugs", since_iso="s", until_iso="u",
+            date="2026-07-17", bug_count=1, used_llm=False,
+            body="# d\nx < y & z")
+        xml = htmlreport.render_feed_atom(
+            self.conn, "foundations-bugs", "https://example.com/dash")
+        root = ET.fromstring(xml)
+        ns = "{http://www.w3.org/2005/Atom}"
+        entries = root.findall(f"{ns}entry")
+        self.assertEqual(len(entries), 1)
+        self.assertIn("x &lt; y &amp; z", entries[0].find(f"{ns}content").text)
 
 
 if __name__ == "__main__":
