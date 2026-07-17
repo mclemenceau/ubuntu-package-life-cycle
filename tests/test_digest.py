@@ -114,7 +114,9 @@ class TestParsers(unittest.TestCase):
         self.assertFalse(digest.closed_in_window(acts, SINCE))
 
 
-class TestSruEvents(unittest.TestCase):
+class TestSruActivityEvents(unittest.TestCase):
+    """The fallback approximation, used only when pending-SRU data is absent."""
+
     def test_series_task_status_change_is_sru(self):
         bug = {
             "id": 42,
@@ -122,7 +124,7 @@ class TestSruEvents(unittest.TestCase):
                 what="flashrom (Ubuntu Noble): status",
                 old="Triaged", new="Invalid"))],
         }
-        events = digest.sru_events([bug], SINCE)
+        events = digest.sru_activity_events([bug], SINCE)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["kind"], "sru")
         self.assertEqual(events[0]["package"], "flashrom")
@@ -139,7 +141,69 @@ class TestSruEvents(unittest.TestCase):
                     date="2026-07-10T00:00:00+00:00")),
             ],
         }
-        self.assertEqual(digest.sru_events([bug], SINCE), [])
+        self.assertEqual(digest.sru_activity_events([bug], SINCE), [])
+
+
+def _sru_row(package, series="noble", proposed="1.2-1ubuntu1", release="1.1-1",
+             age=5.0, bugs=()):
+    return {
+        "package": package, "series": series, "proposed_version": proposed,
+        "release_version": release, "update_version": "", "uploaders": "someone",
+        "age_days": age, "url": "", "bugs": list(bugs),
+    }
+
+
+def _sru_bug(bug_id, cls="", description="fix something"):
+    return {"id": bug_id, "description": description, "cls": cls,
+            "tags": [], "url": ""}
+
+
+class TestPendingSruEvents(unittest.TestCase):
+    def test_new_row_is_sru_proposed(self):
+        cur = [_sru_row("flashrom", bugs=[_sru_bug(1)])]
+        events = digest.pending_sru_events([], cur)
+        self.assertEqual([e["kind"] for e in events], ["sru-proposed"])
+        self.assertIn("1 verification bug", events[0]["detail"])
+
+    def test_row_dropped_is_sru_released(self):
+        prev = [_sru_row("flashrom")]
+        events = digest.pending_sru_events(prev, [])
+        self.assertEqual([e["kind"] for e in events], ["sru-released"])
+
+    def test_new_bug_needs_verification(self):
+        prev = [_sru_row("flashrom", bugs=[])]
+        cur = [_sru_row("flashrom", bugs=[_sru_bug(1)])]
+        events = digest.pending_sru_events(prev, cur)
+        self.assertEqual([e["kind"] for e in events],
+                         ["sru-verification-needed"])
+
+    def test_bug_becomes_verified(self):
+        prev = [_sru_row("flashrom", bugs=[_sru_bug(1, cls="")])]
+        cur = [_sru_row("flashrom", bugs=[_sru_bug(1, cls="verified")])]
+        events = digest.pending_sru_events(prev, cur)
+        self.assertEqual([e["kind"] for e in events], ["sru-verified"])
+
+    def test_bug_becomes_verification_failed(self):
+        prev = [_sru_row("flashrom", bugs=[_sru_bug(1, cls="")])]
+        cur = [_sru_row("flashrom",
+                        bugs=[_sru_bug(1, cls="verificationfailed")])]
+        events = digest.pending_sru_events(prev, cur)
+        self.assertEqual([e["kind"] for e in events],
+                         ["sru-verification-failed"])
+
+    def test_bug_becomes_removal_candidate(self):
+        prev = [_sru_row("flashrom", age=20, bugs=[_sru_bug(1, cls="")])]
+        cur = [_sru_row("flashrom", age=20,
+                        bugs=[_sru_bug(1, cls="removal")])]
+        events = digest.pending_sru_events(prev, cur)
+        self.assertEqual([e["kind"] for e in events],
+                         ["sru-removal-candidate"])
+        self.assertIn("20 days", events[0]["detail"])
+
+    def test_unchanged_status_is_not_an_event(self):
+        prev = [_sru_row("flashrom", bugs=[_sru_bug(1, cls="verified")])]
+        cur = [_sru_row("flashrom", bugs=[_sru_bug(1, cls="verified")])]
+        self.assertEqual(digest.pending_sru_events(prev, cur), [])
 
 
 class TestPipelineEvents(unittest.TestCase):

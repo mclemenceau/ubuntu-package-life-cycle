@@ -24,12 +24,18 @@ TEAM_MAPPING_URLS = [
     # Canonical location (redirects to static-reports.ubuntu.com).
     "https://ubuntu-archive-team.ubuntu.com/package-team-mapping.json",
     # Sibling copy served directly from the archive-team host; useful when
-    # the static-reports ingress is unreachable (e.g. off VPN).
+    # the static-reports ingress is unreachable (occasionally flaky, not a
+    # VPN/access-control issue).
     "https://ubuntu-archive-team.ubuntu.com/package-team-mapping.json.apw",
 ]
 EXCUSES_URL = "https://ubuntu-archive-team.ubuntu.com/proposed-migration/update_excuses.yaml.xz"
 EXCUSES_HTML = "https://ubuntu-archive-team.ubuntu.com/proposed-migration/update_excuses.html"
 MOM_URL = "https://merges.ubuntu.com/{component}.json"
+# sru-report (ubuntu-archive-tools) publishes this alongside pending-sru.html.
+# Same static-reports.ubuntu.com ingress as MoM (occasionally flaky, no VPN
+# required) -> optional source.
+PENDING_SRU_URL = "https://static-reports.ubuntu.com/pending-sru/sru_report.yaml"
+PENDING_SRU_HTML = "https://ubuntu-archive-team.ubuntu.com/pending-sru.html"
 UBUNTU_SOURCES_URL = "http://archive.ubuntu.com/ubuntu/dists/devel/{component}/source/Sources.xz"
 DEBIAN_SOURCES_URL = "https://deb.debian.org/debian/dists/unstable/main/source/Sources.xz"
 
@@ -41,7 +47,7 @@ def team_packages(team: str) -> list[str]:
 
     Fallback only: lpbugs.subscribed_packages is the authoritative source.
     The .apw copy this usually resolves to froze in May 2025, and the
-    primary redirects to static-reports.ubuntu.com (VPN-only).
+    primary redirects to static-reports.ubuntu.com (occasionally flaky).
     """
     mapping = json.loads(fetch_first(TEAM_MAPPING_URLS, timeout=30))
     if team not in mapping:
@@ -184,3 +190,77 @@ def mom_merges() -> dict[str, dict]:
             if name:
                 merges[name] = entry
     return merges
+
+
+# cls tokens sru-report writes into each bug link's class attribute, in the
+# priority order verification actually resolves in (see sru_report.yaml).
+_SRU_STATUS_ORDER = (
+    ("broken", "broken"),
+    ("verificationfailed", "verification-failed"),
+    ("verified", "verified"),
+    ("removal", "removal-candidate"),
+    ("incomplete", "incomplete"),
+)
+
+
+def bug_verification_status(cls: str) -> str:
+    """One bug's SRU verification status for the series it was seen under.
+
+    `cls` is sru-report's own per-row CSS class string (already computed
+    against that specific series' verification-done-<series> tag), so this
+    just reads it back rather than re-deriving anything from tags.
+    """
+    tokens = set((cls or "").split())
+    for token, status in _SRU_STATUS_ORDER:
+        if token in tokens:
+            return status
+    return "pending"
+
+
+def parse_sru_report(raw_yaml: bytes) -> list[dict]:
+    """Flatten sru_report.yaml into one dict per (package, series) row.
+
+    Top level is {series: [package entries]}; each entry's `bugs` list
+    carries per-bug verification status via `cls` (see
+    bug_verification_status). Returns every series/package in the report —
+    callers filter to their own team's packages.
+    """
+    data = yaml.load(raw_yaml, Loader=_YamlLoader) or {}
+    rows = []
+    for series, packages in data.items():
+        for pkg in packages or []:
+            rows.append({
+                "package": pkg.get("pkg", ""),
+                "series": series,
+                "proposed_version": pkg.get("proposed_version", ""),
+                "release_version": pkg.get("release_version", ""),
+                "update_version": pkg.get("update_version", ""),
+                "uploaders": pkg.get("uploaders", ""),
+                "age_days": pkg.get("age"),
+                "url": pkg.get("url", ""),
+                "bugs": [{
+                    "id": b.get("id"),
+                    "description": b.get("description", ""),
+                    "cls": b.get("cls", ""),
+                    "tags": b.get("tags") or [],
+                    "url": b.get("url", ""),
+                } for b in pkg.get("bugs") or []],
+            })
+    return rows
+
+
+def pending_sru() -> list[dict]:
+    """The full pending-SRU report, across every series and package.
+
+    Optional like mom_merges(): static-reports.ubuntu.com shares MoM's
+    occasionally-flaky ingress (no VPN required, just unreliable at
+    times), so an unreachable host degrades to [] rather than failing the
+    run — SRU digest events then fall back to the stable-series-task
+    approximation.
+    """
+    try:
+        raw = fetch(PENDING_SRU_URL, timeout=30)
+    except SourceUnavailable as err:
+        log.warning("pending-sru report unavailable (%s)", err)
+        return []
+    return parse_sru_report(raw)

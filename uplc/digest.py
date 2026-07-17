@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from . import db, lpbugs
+from . import db, lpbugs, sources
 from .state import PROPOSED_STATES
 
 log = logging.getLogger("uplc.digest")
@@ -98,11 +98,13 @@ def closed_in_window(activity: list[dict], since: str) -> bool:
 _SERIES_TASK = re.compile(r"^(\S+) \(Ubuntu (\w+)\): status$")
 
 
-def sru_events(bug_facts: list[dict], since: str) -> list[dict]:
+def sru_activity_events(bug_facts: list[dict], since: str) -> list[dict]:
     """Stable-series task status changes = observable SRU activity.
 
-    Approximation until a pending-sru.json source lands: a status change
-    on a series task is the only SRU signal the bug stream carries.
+    Fallback for when the pending-SRU report has no snapshot this run
+    (static-reports.ubuntu.com is occasionally unreachable, see
+    sources.pending_sru): a status change on a series task is the only
+    SRU signal the bug stream still carries.
     """
     events = []
     for bug in bug_facts:
@@ -118,6 +120,81 @@ def sru_events(bug_facts: list[dict], since: str) -> list[dict]:
                            f"{act['newvalue']} (bug #{bug['id']})"),
             })
     return events
+
+
+def pending_sru_events(
+    prev_rows: list[dict], cur_rows: list[dict],
+) -> list[dict]:
+    """Real SRU events from two consecutive pending-SRU snapshots.
+
+    Diffs the same way pipeline_events diffs package snapshots: entries
+    keyed by (package, series); a bug's `cls` (sru-report's own per-series
+    verification class) changing between runs is the ground-truth signal
+    for verified/failed/removal-candidate, not an approximation.
+    """
+    prev = {(r["package"], r["series"]): r for r in prev_rows}
+    cur = {(r["package"], r["series"]): r for r in cur_rows}
+    events: list[dict] = []
+
+    for key, row in cur.items():
+        package, series = key
+        old = prev.get(key)
+        if old is None:
+            n = len(row["bugs"])
+            events.append({
+                "package": package, "kind": "sru-proposed",
+                "detail": (f"{row['proposed_version']} entered "
+                           f"{series}-proposed"
+                           + (f" ({n} verification bug"
+                              f"{'s' if n != 1 else ''})" if n else "")),
+            })
+            continue
+        old_status = {b["id"]: sources.bug_verification_status(b["cls"])
+                      for b in old["bugs"]}
+        for b in row["bugs"]:
+            status = sources.bug_verification_status(b["cls"])
+            prior = old_status.get(b["id"])
+            if prior == status:
+                continue
+            if prior is None:
+                events.append({
+                    "package": package, "kind": "sru-verification-needed",
+                    "detail": (f"bug #{b['id']} needs {series} "
+                               f"verification: {b['description']}"),
+                })
+            elif status == "verified":
+                events.append({
+                    "package": package, "kind": "sru-verified",
+                    "detail": (f"bug #{b['id']} verified for {series} "
+                               f"({package} {row['proposed_version']})"),
+                })
+            elif status == "verification-failed":
+                events.append({
+                    "package": package, "kind": "sru-verification-failed",
+                    "detail": f"bug #{b['id']} failed verification for "
+                              f"{series}",
+                })
+            elif status == "removal-candidate":
+                age = row["age_days"]
+                events.append({
+                    "package": package, "kind": "sru-removal-candidate",
+                    "detail": (
+                        f"{package} {row['proposed_version']} ({series}) is "
+                        "a removal candidate — "
+                        + (f"{age:.0f} days" if age is not None else "long")
+                        + " without verification"),
+                })
+
+    for key, row in prev.items():
+        if key in cur:
+            continue
+        package, series = key
+        events.append({
+            "package": package, "kind": "sru-released",
+            "detail": f"{row['proposed_version']} left {series}-proposed",
+        })
+
+    return sorted(events, key=lambda e: (e["package"], e["kind"]))
 
 
 def pipeline_events(
@@ -311,6 +388,8 @@ def build_facts(
     since: str,
     until: str,
     date: str,
+    sru_rows: list[dict] | None = None,
+    prev_sru_rows: list[dict] | None = None,
 ) -> dict:
     by_bug: dict[int, list[dict]] = {}
     for row in bug_rows:
@@ -326,8 +405,23 @@ def build_facts(
             for t in bug["tasks"]
             if t["package"] in snaps]
 
+    sru_rows = sru_rows or []
+    prev_sru_rows = prev_sru_rows or []
+    sru_by_bug: dict[int, list[dict]] = {}
+    for row in sru_rows:
+        for b in row["bugs"]:
+            sru_by_bug.setdefault(b["id"], []).append({
+                "series": row["series"],
+                "status": sources.bug_verification_status(b["cls"]),
+                "proposed_version": row["proposed_version"],
+            })
+    for bug in bugs:
+        bug["sru"] = sru_by_bug.get(bug["id"], [])
+
     events = pipeline_events(prev_snapshot_rows, snapshot_rows, transitions)
-    events += sru_events(bugs, since)
+    events += pending_sru_events(prev_sru_rows, sru_rows)
+    if not sru_rows and not prev_sru_rows:
+        events += sru_activity_events(bugs, since)
 
     packages = {t["package"] for b in bugs for t in b["tasks"]
                 if t["package"]}
@@ -413,6 +507,9 @@ def _bug_block(bug: dict) -> list[str]:
         if ref["age_days"]:
             note += f" ({ref['age_days']:.0f} days)"
         lines.append(f"- {note}")
+    for ref in bug["sru"]:
+        lines.append(f"- SRU: {ref['status']} for {ref['series']} "
+                     f"({ref['proposed_version']})")
     lines.append("")
     return lines
 
@@ -479,10 +576,13 @@ def render_fallback(facts: dict) -> str:
 PROMPT = """\
 You are writing the daily bugs digest for an Ubuntu Foundations engineering
 manager. stdin carries a JSON facts document: `digest` (counts and scope),
-`bugs` (each with tasks, window-filtered `activity` and `messages`, and
-`pipeline` cross-references), and `pipeline_events` (package lifecycle:
-uploads, migrations, merges, FTBFS, autopkgtest regressions, SRU task
-changes — each with a ground-truth `detail` string).
+`bugs` (each with tasks, window-filtered `activity` and `messages`,
+`pipeline` cross-references, and `sru` cross-references — verification
+status per stable series the bug is pending SRU verification for), and
+`pipeline_events` (package lifecycle: uploads, migrations, merges, FTBFS,
+autopkgtest regressions, and SRU events — `sru-proposed`, `sru-verified`,
+`sru-verification-failed`, `sru-verification-needed`, `sru-removal-
+candidate`, `sru-released` — each with a ground-truth `detail` string).
 
 Write a skimmable, decision-oriented Markdown digest:
 
@@ -511,7 +611,10 @@ Omit any section with nothing to say. Hard rules:
   [#NNN](https://bugs.launchpad.net/bugs/NNN)
 - quote people only from messages[].content, attributed to messages[].owner
 - for pipeline events, treat their `detail` strings as ground truth; SRU
-  events are approximations from series-task changes — do not overclaim
+  events come from the pending-SRU report when available (real verification
+  status), falling back to an approximation from series-task changes only
+  when that report was unreachable this run — do not overclaim beyond
+  what `detail` says
 - never invent facts, links, versions, or people; timestamps between
   ingest runs are approximate — say "between runs", not exact times
 - output raw Markdown only: no preamble, no code fence around the document
@@ -613,6 +716,12 @@ def _snap_dict(row) -> dict:
     return d
 
 
+def _sru_dict(row) -> dict:
+    d = dict(row)
+    d["bugs"] = json.loads(d.get("bugs") or "[]")
+    return d
+
+
 def generate(
     conn,
     team: str,
@@ -648,21 +757,28 @@ def generate(
 
     cur_run = db.latest_run(conn, team)
     snapshot_rows, prev_snapshot_rows, transitions = [], [], []
+    sru_rows, prev_sru_rows = [], []
     if cur_run is not None:
         snapshot_rows = [
             _snap_dict(r) for r in db.snapshots_for_run(conn, cur_run["id"])]
+        sru_rows = [
+            _sru_dict(r) for r in db.pending_sru_for_run(conn, cur_run["id"])]
         prev_run = db.run_at_or_before(conn, team, since)
         if prev_run is not None and prev_run["id"] != cur_run["id"]:
             prev_snapshot_rows = [
                 _snap_dict(r)
                 for r in db.snapshots_for_run(conn, prev_run["id"])]
+            prev_sru_rows = [
+                _sru_dict(r)
+                for r in db.pending_sru_for_run(conn, prev_run["id"])]
             transitions = [dict(r) for r in db.transitions_between(
                 conn, prev_run["ran_at"], cur_run["ran_at"])]
 
     facts = build_facts(
         bug_rows, extras, snapshot_rows, prev_snapshot_rows, transitions,
         dict(cur_run) if cur_run else None, dict(sync_row),
-        team=team, since=since, until=until, date=date)
+        team=team, since=since, until=until, date=date,
+        sru_rows=sru_rows, prev_sru_rows=prev_sru_rows)
 
     body, used_llm = None, False
     if not no_llm:

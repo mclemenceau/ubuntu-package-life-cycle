@@ -71,6 +71,20 @@ CREATE TABLE IF NOT EXISTS bug_sync (
     bug_count INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_bug_tasks_package ON bug_tasks(package);
+CREATE TABLE IF NOT EXISTS pending_sru (
+    run_id INTEGER NOT NULL REFERENCES ingest_runs(id),
+    package TEXT NOT NULL,
+    series TEXT NOT NULL,
+    proposed_version TEXT,
+    release_version TEXT,
+    update_version TEXT,
+    uploaders TEXT,
+    age_days REAL,
+    url TEXT,
+    bugs TEXT,                          -- JSON: [{id, description, cls, tags, url}]
+    PRIMARY KEY (run_id, package, series)
+);
+CREATE INDEX IF NOT EXISTS idx_pending_sru_package ON pending_sru(package);
 CREATE TABLE IF NOT EXISTS digest_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ran_at TEXT NOT NULL,               -- UTC ISO-8601
@@ -161,6 +175,42 @@ def record_run(
 
     conn.commit()
     return run_id
+
+
+def record_pending_sru(
+    conn: sqlite3.Connection, run_id: int, rows: list[dict],
+) -> None:
+    """Append one ingest run's pending-SRU rows (already team-filtered).
+
+    Like `snapshots`, this is a full per-run snapshot rather than an
+    upsert: digest.py diffs consecutive runs to derive real SRU events
+    (newly verified, verification-failed, removal-candidate, ...).
+    """
+    for r in rows:
+        conn.execute(
+            "INSERT INTO pending_sru (run_id, package, series,"
+            " proposed_version, release_version, update_version,"
+            " uploaders, age_days, url, bugs) VALUES"
+            " (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, r["package"], r["series"], r["proposed_version"],
+             r["release_version"], r["update_version"], r["uploaders"],
+             r["age_days"], r["url"], json.dumps(r["bugs"])))
+    conn.commit()
+
+
+def pending_sru_for_run(
+    conn: sqlite3.Connection, run_id: int,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM pending_sru WHERE run_id = ? ORDER BY package, series",
+        (run_id,)).fetchall()
+
+
+def latest_pending_sru(
+    conn: sqlite3.Connection, team: str,
+) -> list[sqlite3.Row]:
+    run = latest_run(conn, team)
+    return pending_sru_for_run(conn, run["id"]) if run else []
 
 
 def latest_run(conn: sqlite3.Connection, team: str) -> sqlite3.Row | None:

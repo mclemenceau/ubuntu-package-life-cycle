@@ -24,7 +24,7 @@ from . import db, kpi
 from .db import OPEN_BUG_STATUSES
 from .lpbugs import FIRST_SYNC_SINCE
 from .report import STATE_LABELS, _age_str
-from .sources import EXCUSES_HTML
+from .sources import EXCUSES_HTML, bug_verification_status
 from .state import BLOCKED_STATES, PROPOSED_STATES, STATES
 
 # Status roles (icon+label always accompany the color). Severity ladder:
@@ -47,6 +47,17 @@ _IMPORTANCE_RANK = {
     "Critical": 5, "High": 4, "Medium": 3, "Low": 2, "Wishlist": 1,
 }
 _IMPORTANCE_STATUS = {"Critical": "critical", "High": "serious"}
+
+_SRU_STATUS_LABEL = {
+    "verified": "verified", "verification-failed": "verification failed",
+    "removal-candidate": "removal candidate", "incomplete": "incomplete",
+    "broken": "broken", "pending": "needs verification",
+}
+_SRU_STATUS_ROLE = {
+    "verified": "good", "verification-failed": "critical",
+    "removal-candidate": "serious", "incomplete": "warning",
+    "broken": "critical",
+}
 
 _STALE_DAYS = 90
 
@@ -443,6 +454,22 @@ def _imp_chip(importance: str) -> str:
     return f'<span class="chip">{dot}{_e(importance or "Undecided")}</span>'
 
 
+def _sru_chip(status: str) -> str:
+    role = _SRU_STATUS_ROLE.get(status)
+    dot = f'<span class="dot" style="background:var(--{role})"></span>' \
+        if role else ""
+    return f'<span class="chip">{dot}{_e(_SRU_STATUS_LABEL.get(status, status))}</span>'
+
+
+def _pending_sru_rows(conn: sqlite3.Connection, team: str) -> list[dict]:
+    rows = []
+    for r in db.latest_pending_sru(conn, team):
+        d = dict(r)
+        d["bugs"] = json.loads(d.get("bugs") or "[]")
+        rows.append(d)
+    return rows
+
+
 def _nav(active: str) -> str:
     links = []
     for name, label in _PAGES_NAV:
@@ -794,6 +821,34 @@ def _pipeline_refs(conn: sqlite3.Connection, team: str) -> dict[int, list]:
     return refs
 
 
+def _sru_table(rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    body = []
+    for r in sorted(rows, key=lambda r: (-(r["age_days"] or 0), r["package"])):
+        bugs = " ".join(
+            f'{_bug_link(b["id"])} {_sru_chip(bug_verification_status(b["cls"]))}'
+            for b in r["bugs"]) or '<span class="empty">—</span>'
+        age = f'{r["age_days"]:.0f}d' if r["age_days"] is not None else "—"
+        body.append(
+            "<tr>"
+            f'<td class="pkg">{_pkg_anchor(r["package"])}</td>'
+            f'<td>{_e(r["series"])}</td>'
+            f'<td class="ver">{_e(r["proposed_version"])}</td>'
+            f'<td class="num">{age}</td>'
+            f'<td class="cell">{bugs}</td>'
+            "</tr>")
+    return ("<h2>Pending SRU verification "
+            f"({len(rows)})</h2>"
+            '<p class="empty">Team packages with an upload sitting in a '
+            "stable series' -proposed pocket, from the archive's "
+            "pending-sru report.</p>"
+            '<div class="card scroll"><table>'
+            "<tr><th>Package</th><th>Series</th><th>Proposed version</th>"
+            "<th>Age</th><th>Verification bugs</th></tr>"
+            + "".join(body) + "</table></div>")
+
+
 def _gating_table(refs: dict[int, list], by_id: dict[int, dict]) -> str:
     if not refs:
         return ""
@@ -859,6 +914,7 @@ def render_bugs(conn: sqlite3.Connection, team: str) -> str:
     sync = db.bug_sync_state(conn, team)
     bugs = _aggregate_bugs(conn)
     refs = _pipeline_refs(conn, team)
+    sru_rows = _pending_sru_rows(conn, team)
 
     if not bugs:
         return f"""<title>Bugs — {_e(team)}</title>
@@ -870,6 +926,7 @@ def render_bugs(conn: sqlite3.Connection, team: str) -> str:
 <code>uplc bugs-sync</code> — the first sync fetches every bug touched
 this year (heavy, one-time); after that each sync is a small watermarked
 increment.</p></div>
+{_sru_table(sru_rows)}
 {_footer()}
 </div></div>
 """
@@ -975,6 +1032,7 @@ increment.</p></div>
  · "Activity" is time since the last change on the bug</div>
 <div class="tiles">{tiles}</div>
 {_gating_table(refs, by_id)}
+{_sru_table(sru_rows)}
 {_trend_chart(bugs)}
 <h2>All bugs ({len(bugs)})</h2>
 {filters}
@@ -1236,6 +1294,47 @@ def _levels_table(conn: sqlite3.Connection, team: str,
             "reconstructed from Launchpad dates.</p>")
 
 
+def _sru_kpi_section(rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    sk = kpi.sru_kpis(rows)
+    med = sk["median_age_days"]
+    tiles = "".join([
+        _tile("Needs verification", sk["needs_verification"],
+              f"of {sk['pending_rows']} pending-SRU rows"),
+        _tile("Verified", sk["verified"], "all bugs verified"),
+        _tile("Verification failed", sk["verification_failed"],
+              "" if not sk["verification_failed"] else "needs a re-upload"),
+        _tile("Removal candidates", sk["removal_candidates"],
+              "" if not sk["removal_candidates"] else
+              ">16 days unverified"),
+        _tile("Median age awaiting verification",
+              f"{med:.0f}d" if med is not None else "—",
+              "of rows still needing verification"),
+    ])
+    oldest = []
+    for r in sk["oldest"]:
+        bugs = " ".join(_bug_link(b["id"]) for b in r["bugs"]) or "—"
+        age = f'{r["age_days"]:.0f}d' if r["age_days"] is not None else "—"
+        oldest.append(
+            "<tr>"
+            f'<td class="pkg">{_pkg_anchor(r["package"])}</td>'
+            f'<td>{_e(r["series"])}</td>'
+            f'<td class="num">{age}</td>'
+            f'<td class="cell">{bugs}</td>'
+            "</tr>")
+    oldest_table = ("<details class=\"tbl\"><summary>Oldest rows still "
+                    "awaiting verification</summary><table><tr><th>Package"
+                    "</th><th>Series</th><th>Age</th><th>Bugs</th></tr>"
+                    + "".join(oldest) + "</table></details>") if oldest else ""
+    return (f"<h2>SRU verification queue</h2>\n<div class=\"tiles\">{tiles}"
+            f"</div>\n{oldest_table}\n"
+            '<p class="empty">From the archive\'s pending-sru report '
+            "(team packages only); age is time since the upload entered "
+            "-proposed. See <a href=\"bugs.html\">bugs.html</a> for the "
+            "full per-package table.</p>")
+
+
 def render_kpi(conn: sqlite3.Connection, team: str) -> str:
     run, snaps = _latest(conn, team)
     now = datetime.now(timezone.utc)
@@ -1245,6 +1344,7 @@ def render_kpi(conn: sqlite3.Connection, team: str) -> str:
     bugs = _aggregate_bugs(conn)
     transitions = [dict(t) for t in db.all_transitions(conn)]
     history_start = db.first_run_at(conn, team) or run["ran_at"]
+    sru_section = _sru_kpi_section(_pending_sru_rows(conn, team))
 
     stuck = sum(
         1 for s in snaps if s["state"] in PROPOSED_STATES
@@ -1325,6 +1425,7 @@ def render_kpi(conn: sqlite3.Connection, team: str) -> str:
 <h2>Package set health</h2>
 <div class="tiles">{pkg_tiles}</div>
 {bug_section}
+{sru_section}
 <h2>Rate of change</h2>
 {_rates_table(bugs, transitions, now, history_start)}
 <h2>Levels — now vs then</h2>

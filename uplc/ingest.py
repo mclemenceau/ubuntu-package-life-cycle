@@ -39,6 +39,7 @@ class IngestResult:
     excuses_generated: str
     states: list[PackageState]
     mom_available: bool
+    sru_available: bool
 
 
 def run_ingest(team: str, db_path: Path | None = None) -> IngestResult:
@@ -73,6 +74,13 @@ def run_ingest(team: str, db_path: Path | None = None) -> IngestResult:
     if mom:
         log.info("%d outstanding merges in Merge-o-Matic", len(mom))
 
+    log.info("fetching pending-SRU report ...")
+    team_packages = set(packages)
+    sru_rows = [r for r in sources.pending_sru()
+                if r["package"] in team_packages]
+    if sru_rows:
+        log.info("%d pending-SRU rows for team packages", len(sru_rows))
+
     log.info("deriving package states ...")
     states = derive_all(packages, excuses, ubuntu_versions, debian_versions, mom)
 
@@ -81,9 +89,10 @@ def run_ingest(team: str, db_path: Path | None = None) -> IngestResult:
     run_id = db.record_run(
         conn, states, team=team, series=series,
         excuses_generated=excuses_generated)
+    db.record_pending_sru(conn, run_id, sru_rows)
     conn.close()
 
     return IngestResult(
         run_id=run_id, series=series, team=team,
         excuses_generated=excuses_generated, states=states,
-        mom_available=bool(mom))
+        mom_available=bool(mom), sru_available=bool(sru_rows))

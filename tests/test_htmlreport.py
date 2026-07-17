@@ -25,6 +25,18 @@ def _seed_pipeline(conn):
                   excuses_generated="2026-07-16")
 
 
+def _seed_sru(conn):
+    run = db.latest_run(conn, "foundations-bugs")
+    db.record_pending_sru(conn, run["id"], [
+        {"package": "grub2", "series": "jammy",
+         "proposed_version": "2.12-5ubuntu0.1", "release_version": "2.12-5",
+         "update_version": "", "uploaders": "someone", "age_days": 20.0,
+         "url": "", "bugs": [
+             {"id": 700, "description": "needs testing", "cls": "removal",
+              "tags": [], "url": ""}]},
+    ])
+
+
 def _seed_bugs(conn):
     db.record_bug(conn, {
         "id": 555, "title": "grub2 breaks on riscv",
@@ -92,6 +104,21 @@ class TestRenderPages(unittest.TestCase):
         page = htmlreport.render_bugs(self.conn, "foundations-bugs")
         self.assertIn("No bug data yet", page)
 
+    def test_bugs_page_pending_sru_table(self):
+        _seed_bugs(self.conn)
+        _seed_sru(self.conn)
+        page = htmlreport.render_bugs(self.conn, "foundations-bugs")
+        self.assertIn("Pending SRU verification", page)
+        self.assertIn('href="packages.html#pkg-grub2"', page)
+        self.assertIn("https://launchpad.net/bugs/700", page)
+        self.assertIn("removal candidate", page)
+
+    def test_bugs_page_empty_state_still_shows_sru(self):
+        _seed_sru(self.conn)
+        page = htmlreport.render_bugs(self.conn, "foundations-bugs")
+        self.assertIn("No bug data yet", page)
+        self.assertIn("Pending SRU verification", page)
+
     def test_kpi_page_with_bug_data(self):
         _seed_bugs(self.conn)
         page = htmlreport.render_kpi(self.conn, "foundations-bugs")
@@ -110,6 +137,17 @@ class TestRenderPages(unittest.TestCase):
         self.assertIn("bugs-sync", page)
         self.assertIn("Rate of change", page)
         self.assertNotIn("<svg", page)
+
+    def test_kpi_page_sru_section(self):
+        _seed_sru(self.conn)
+        page = htmlreport.render_kpi(self.conn, "foundations-bugs")
+        self.assertIn("SRU verification queue", page)
+        self.assertIn("Removal candidates", page)
+        self.assertIn("https://launchpad.net/bugs/700", page)
+
+    def test_kpi_page_without_sru_data_omits_section(self):
+        page = htmlreport.render_kpi(self.conn, "foundations-bugs")
+        self.assertNotIn("SRU verification queue", page)
 
 
 class TestMdHtml(unittest.TestCase):

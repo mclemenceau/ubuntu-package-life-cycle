@@ -25,6 +25,9 @@ def _cmd_ingest(args) -> int:
           f"series {result.series}, excuses {result.excuses_generated}")
     if not result.mom_available:
         print("note: Merge-o-Matic unreachable, used Sources comparison only")
+    if not result.sru_available:
+        print("note: pending-SRU report unreachable, digest SRU events will "
+              "use the stable-series-task approximation")
     return 0
 
 

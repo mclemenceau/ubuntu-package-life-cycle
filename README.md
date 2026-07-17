@@ -17,6 +17,7 @@ local cache:
 | Why is something stuck in -proposed? | `update_excuses.yaml.xz` (proposed-migration) |
 | What version is where? | `Sources.xz` from archive.ubuntu.com (devel) and deb.debian.org (unstable) |
 | Merge metadata | merges.ubuntu.com (optional; degrades to Sources comparison when unreachable) |
+| Pending SRUs | `sru_report.yaml` from static-reports.ubuntu.com (optional, same ingress as merges.ubuntu.com — occasionally flaky, no VPN required; degrades to a bug-activity approximation when unreachable) |
 | Team bugs | anonymous Launchpad API, watermarked (see below) |
 
 Each ingest run snapshots every package's derived lifecycle state into
@@ -56,16 +57,19 @@ requests) with five interconnected pages:
   expands to detail plus out-links (Launchpad, excuses, Debian tracker).
   Package names everywhere link here first (`#pkg-<name>`).
 - **bugs.html** — bug prioritization: pipeline-gating bugs first, opened
-  vs closed trend, and a filterable table (open/closed, importance,
-  untriaged, unassigned, stale, gating). Bug numbers always link to
-  Launchpad. Filters are reflected in the URL hash, so filtered views are
-  shareable (e.g. `bugs.html#q=glibc`).
+  vs closed trend, a table of team packages with a pending SRU (verification
+  status per bug, from the archive's `sru_report.yaml`), and a filterable
+  table (open/closed, importance, untriaged, unassigned, stale, gating).
+  Bug numbers always link to Launchpad. Filters are reflected in the URL
+  hash, so filtered views are shareable (e.g. `bugs.html#q=glibc`).
 - **kpi.html** — set-health metrics: package and bug percentages (in sync,
   blocked share, triaged, assigned, fix rate, concentration), daily/weekly/
-  monthly rates of change, levels now vs 1/7/30 days ago, and opened-vs-
-  closed and open-backlog charts. Bug rates come from Launchpad's own
-  dates and are complete immediately; pipeline rates count observed
-  snapshot transitions and sharpen as ingest history accumulates.
+  monthly rates of change, levels now vs 1/7/30 days ago, opened-vs-closed
+  and open-backlog charts, and an SRU verification queue section (needs
+  verification / verified / failed / removal-candidate counts, median age
+  awaiting verification). Bug rates come from Launchpad's own dates and
+  are complete immediately; pipeline rates count observed snapshot
+  transitions and sharpen as ingest history accumulates.
 - **digest.html** — blog-style archive of every daily digest, grouped by
   month, newest open. Subscribable: the site also writes `feed.json`
   (JSON Feed 1.1) and `feed.xml` (Atom) with the last 20 digests, so
@@ -80,7 +84,10 @@ bugs touched since the previous digest (with their fresh comments and
 activity, fetched by ID through the same conditional-GET cache) plus
 package lifecycle events derived from the snapshot history — uploads,
 migrations, merges opened/resolved, FTBFS, new autopkgtest regressions,
-and SRU task changes.
+and SRU events (entered -proposed, verified, verification failed,
+removal-candidate, released) diffed from consecutive pending-SRU report
+snapshots; falls back to an approximation from stable-series bug-task
+changes only when that report was unreachable this run.
 
 The narrative is written by an LLM invoked as a subprocess. The runner
 contract is deliberately trivial so any model works: the command gets the
@@ -146,8 +153,5 @@ not-in-devel       subscribed package absent from the devel series
 
 ## Roadmap
 
-- **SRU track**: pending-sru.json + verification-needed bug aging (the
-  digest's SRU events are currently approximated from stable-series bug
-  task changes).
 - **Sponsorship queue** annotations.
 - **Trend views**: per-day/week/month rollups over the snapshot history.

@@ -17,6 +17,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from statistics import median
 
+from .sources import bug_verification_status
 from .state import BLOCKED_STATES, PROPOSED_STATES
 
 # (label, days) — the three rate-of-change windows on the KPI page.
@@ -171,6 +172,46 @@ def backlog_series(
         out.append((day.date(), open_backlog_at(bugs, eod)))
     out.append((now.date(), open_backlog_at(bugs, now)))
     return out
+
+
+def sru_kpis(rows: list[dict]) -> dict:
+    """Health of the pending-SRU verification queue (latest snapshot only).
+
+    `rows` are one dict per (package, series) from the pending-SRU report
+    (sources.parse_sru_report); `age_days` is time since the upload
+    entered -proposed (Launchpad's own clock) — the report has no per-bug
+    age of its own, so it doubles as "how long has this row's still-
+    pending verification been waiting".
+    """
+    needs_verification = []
+    verified = failed = removal = 0
+    for r in rows:
+        statuses = {bug_verification_status(b["cls"]) for b in r["bugs"]}
+        if not statuses:
+            statuses = {"pending"}
+        if "verification-failed" in statuses:
+            failed += 1
+        if "removal-candidate" in statuses:
+            removal += 1
+        if statuses == {"verified"}:
+            verified += 1
+        if statuses & {"pending", "incomplete", "removal-candidate"}:
+            needs_verification.append(r)
+    ages = [r["age_days"] for r in needs_verification
+            if r["age_days"] is not None]
+    oldest = sorted(
+        needs_verification,
+        key=lambda r: -(r["age_days"] if r["age_days"] is not None else -1),
+    )[:5]
+    return {
+        "pending_rows": len(rows),
+        "needs_verification": len(needs_verification),
+        "verified": verified,
+        "verification_failed": failed,
+        "removal_candidates": removal,
+        "median_age_days": median(ages) if ages else None,
+        "oldest": oldest,
+    }
 
 
 def bug_concentration(bugs: list[dict], top: int = 5) -> dict:

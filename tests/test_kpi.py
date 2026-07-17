@@ -147,5 +147,55 @@ class TestSeriesAndConcentration(unittest.TestCase):
         self.assertEqual(conc["packages_with_bugs"], 2)
 
 
+def _sru_row(package, series="focal", age=5.0, bugs=()):
+    return {"package": package, "series": series, "age_days": age,
+            "bugs": list(bugs)}
+
+
+def _sru_bug(bug_id, cls=""):
+    return {"id": bug_id, "cls": cls}
+
+
+class TestSruKpis(unittest.TestCase):
+    def test_counts_by_status(self):
+        rows = [
+            _sru_row("flashrom", age=3, bugs=[_sru_bug(1, "verified")]),
+            _sru_row("knot", series="jammy", age=20,
+                     bugs=[_sru_bug(2, "removal")]),
+            _sru_row("apt", age=1, bugs=[_sru_bug(3, "verificationfailed")]),
+            _sru_row("bash", age=7, bugs=[_sru_bug(4, "")]),  # pending
+        ]
+        sk = kpi.sru_kpis(rows)
+        self.assertEqual(sk["pending_rows"], 4)
+        self.assertEqual(sk["verified"], 1)
+        self.assertEqual(sk["removal_candidates"], 1)
+        self.assertEqual(sk["verification_failed"], 1)
+        # needs_verification: removal-candidate and pending rows both still
+        # need action (removal is a still-pending bug that aged out).
+        self.assertEqual(sk["needs_verification"], 2)
+        self.assertEqual(sk["median_age_days"], 13.5)
+
+    def test_row_with_no_bugs_counts_as_pending(self):
+        rows = [_sru_row("flashrom", age=2, bugs=[])]
+        sk = kpi.sru_kpis(rows)
+        self.assertEqual(sk["needs_verification"], 1)
+        self.assertEqual(sk["verified"], 0)
+
+    def test_empty_input(self):
+        sk = kpi.sru_kpis([])
+        self.assertEqual(sk["pending_rows"], 0)
+        self.assertIsNone(sk["median_age_days"])
+        self.assertEqual(sk["oldest"], [])
+
+    def test_oldest_sorted_descending_by_age(self):
+        rows = [
+            _sru_row("a", age=1, bugs=[_sru_bug(1, "")]),
+            _sru_row("b", age=30, bugs=[_sru_bug(2, "")]),
+            _sru_row("c", age=10, bugs=[_sru_bug(3, "")]),
+        ]
+        sk = kpi.sru_kpis(rows)
+        self.assertEqual([r["package"] for r in sk["oldest"]], ["b", "c", "a"])
+
+
 if __name__ == "__main__":
     unittest.main()
