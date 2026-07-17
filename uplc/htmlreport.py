@@ -38,7 +38,7 @@ _STATE_STATUS = {
     "blocked-other": "serious",
     "waiting-age": "warning",
     "merge-needed": "warning",
-    "sync-available": "warning",
+    "sync-available": "good",
     "ready-to-migrate": "good",
     "in-sync": "good",
 }
@@ -861,9 +861,15 @@ def _gating_table(refs: dict[int, list], by_id: dict[int, dict]) -> str:
             '<span class="empty">(not yet synced)</span>'
         status = _e(bug["status"]) if bug else ""
         imp = _imp_chip(bug["importance"]) if bug else ""
+        assignees = bug["assignees"] if bug else []
+        assigned = ", ".join(assignees[:2]) if assignees else \
+            '<span class="empty">unassigned</span>'
+        if len(assignees) > 2:
+            assigned += f" +{len(assignees) - 2}"
         rows.append(
             f'<tr><td class="num">{_bug_link(bug_id)}</td>'
             f'<td class="title">{title}</td><td>{status}</td><td>{imp}</td>'
+            f'<td>{assigned}</td>'
             f'<td class="cell">{pkgs}</td></tr>')
     return (f"<h2>Gating the pipeline ({len(refs)})</h2>"
             '<p class="empty">Bugs referenced by proposed-migration '
@@ -871,7 +877,7 @@ def _gating_table(refs: dict[int, list], by_id: dict[int, dict]) -> str:
             "unblocks migrations.</p>"
             '<div class="card scroll"><table>'
             "<tr><th>Bug</th><th>Title</th><th>Status</th><th>Importance</th>"
-            "<th>Holds up</th></tr>"
+            "<th>Assigned</th><th>Holds up</th></tr>"
             + "".join(rows) + "</table></div>")
 
 
