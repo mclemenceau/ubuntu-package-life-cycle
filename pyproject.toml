@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "uplc"
 version = "0.1.0"
 description = "Observe a team's Ubuntu packages across the development pipeline"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = ["PyYAML"]
 
