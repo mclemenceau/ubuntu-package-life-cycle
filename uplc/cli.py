@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -62,34 +63,63 @@ def _cmd_blockers(args) -> int:
     return 0
 
 
-def _wrap_page(body: str) -> str:
+def _cmd_digest(args) -> int:
+    from . import digest
+    conn = db.connect(args.db)
+    result = digest.generate(conn, args.team, since=args.since,
+                             no_llm=args.no_llm, llm_cmd=args.llm_cmd)
+    how = "LLM narrative" if result.used_llm else "deterministic fallback"
+    if args.stdout:
+        print(result.body)
+    else:
+        args.output.mkdir(parents=True, exist_ok=True)
+        path = args.output / f"digest-{result.date}.md"
+        path.write_text(result.body)
+        print(f"wrote {path} ({result.bug_count} bugs, {how})")
+    return 0
+
+
+def _wrap_page(body: str, *, feeds: bool = True) -> str:
+    links = ""
+    if feeds:
+        links = ("<link rel='alternate' type='application/feed+json' "
+                 "title='digest' href='feed.json'>"
+                 "<link rel='alternate' type='application/atom+xml' "
+                 "title='digest' href='feed.xml'>")
     return ("<!doctype html><html><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,"
-            " initial-scale=1'></head><body style='margin:0'>"
+            f" initial-scale=1'>{links}</head><body style='margin:0'>"
             f"{body}</body></html>")
 
 
-def _write_site(conn, team: str, outdir: Path) -> list[Path]:
-    from .htmlreport import PAGES
+def _write_site(conn, team: str, outdir: Path, base_url: str = "") -> list[Path]:
+    from .htmlreport import PAGES, render_feed_atom, render_feed_json
     outdir.mkdir(parents=True, exist_ok=True)
     written = []
     for name, renderer in PAGES.items():
         path = outdir / name
         path.write_text(_wrap_page(renderer(conn, team)))
         written.append(path)
+    for name, renderer in (("feed.json", render_feed_json),
+                           ("feed.xml", render_feed_atom)):
+        path = outdir / name
+        path.write_text(renderer(conn, team, base_url))
+        written.append(path)
     return written
 
 
 def _cmd_html(args) -> int:
     conn = db.connect(args.db)
+    base_url = args.base_url or os.environ.get("UPLC_BASE_URL", "")
     if args.output.suffix == ".html":
         # Single-file compatibility mode: just the overview page.
         from .htmlreport import render_index
-        args.output.write_text(_wrap_page(render_index(conn, args.team)))
+        args.output.write_text(
+            _wrap_page(render_index(conn, args.team), feeds=False))
         print(f"wrote {args.output} (overview only; "
               "use a directory for all pages)")
         return 0
-    for path in _write_site(conn, args.team, args.output):
+    for path in _write_site(conn, args.team, args.output, base_url):
         print(f"wrote {path}")
     return 0
 
@@ -134,6 +164,25 @@ def main(argv=None) -> int:
     _add_common(p)
     p.set_defaults(func=_cmd_bugs_sync)
 
+    p = sub.add_parser("digest",
+                       help="write the daily curated digest (LLM narrative "
+                            "with deterministic fallback)")
+    _add_common(p)
+    p.add_argument("-o", "--output", type=Path, default=Path("."),
+                   help="directory for digest-YYYY-MM-DD.md (default: .)")
+    p.add_argument("--since", default=None,
+                   help="ISO window start (default: where the previous "
+                        "digest ended, or today 00:00 UTC)")
+    p.add_argument("--no-llm", action="store_true",
+                   help="skip the LLM, render the deterministic digest")
+    p.add_argument("--llm-cmd", default=None,
+                   help="narrative command (default: $UPLC_LLM_CMD or "
+                        "'claude -p'; gets the prompt as last argument, "
+                        "facts JSON on stdin, prints Markdown)")
+    p.add_argument("--stdout", action="store_true",
+                   help="print the digest instead of writing a file")
+    p.set_defaults(func=_cmd_digest)
+
     p = sub.add_parser("status", help="funnel summary + proposed pipeline")
     _add_common(p)
     p.set_defaults(func=_cmd_status)
@@ -153,6 +202,9 @@ def main(argv=None) -> int:
     p.add_argument("-o", "--output", type=Path, default=Path("dashboard"),
                    help="output directory for all pages, or a .html file "
                         "for the overview page only (default: dashboard/)")
+    p.add_argument("--base-url", default=None,
+                   help="public URL of the site, used for links in the "
+                        "digest feeds (default: $UPLC_BASE_URL)")
     p.set_defaults(func=_cmd_html)
 
     p = sub.add_parser("serve", help="serve the dashboard over local HTTP")
@@ -169,6 +221,7 @@ def main(argv=None) -> int:
         # look like a hang; -v adds per-URL fetch and parse detail.
         logging.getLogger("uplc.ingest").setLevel(logging.INFO)
         logging.getLogger("uplc.lpbugs").setLevel(logging.INFO)
+        logging.getLogger("uplc.digest").setLevel(logging.INFO)
     return args.func(args)
 
 

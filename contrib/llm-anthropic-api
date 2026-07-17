@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Example UPLC_LLM_CMD runner: direct Anthropic Messages API, stdlib only.
+
+Honours the uplc digest runner contract: prompt as the last argument,
+facts JSON on stdin, Markdown on stdout, exit 0 on success. Use it (or
+copy it for any other vendor's HTTP API) when the box has no LLM CLI:
+
+    export ANTHROPIC_API_KEY=...
+    UPLC_LLM_CMD=contrib/llm-anthropic-api uplc digest -o digests/
+"""
+
+import json
+import os
+import sys
+import urllib.request
+
+MODEL = os.environ.get("UPLC_LLM_MODEL", "claude-sonnet-5")
+
+prompt = sys.argv[1]
+facts = sys.stdin.read()
+
+req = urllib.request.Request(
+    "https://api.anthropic.com/v1/messages",
+    headers={
+        "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    },
+    data=json.dumps({
+        "model": MODEL,
+        "max_tokens": 4096,
+        "system": prompt,
+        "messages": [{"role": "user", "content": facts}],
+    }).encode())
+
+with urllib.request.urlopen(req, timeout=280) as resp:
+    reply = json.load(resp)
+
+print("".join(b.get("text", "") for b in reply["content"]))
