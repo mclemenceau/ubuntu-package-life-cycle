@@ -72,6 +72,36 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(since, "2026-07-01T11:00:00+00:00")
 
 
+class TestSubscribedPackages(unittest.TestCase):
+    def test_parse_subscriber_packages(self):
+        entries = [
+            {"self_link": f"{API}/ubuntu/+source/glibc"},
+            {"self_link": f"{API}/ubuntu/+source/apt"},
+            {"self_link": f"{API}/debian/+source/dpkg"},  # not Ubuntu
+            {"self_link": f"{API}/ubuntu"},               # no package
+            {},
+        ]
+        self.assertEqual(lpbugs.parse_subscriber_packages(entries),
+                         ["apt", "glibc"])
+
+    def test_subscribed_packages_paginates(self):
+        first = (f"{API}/~foundations-bugs?"
+                 "ws.op=getBugSubscriberPackages&ws.size=300")
+        pages = {
+            first: {
+                "entries": [{"self_link": f"{API}/ubuntu/+source/glibc"}],
+                "next_collection_link": f"{first}&ws.start=300",
+            },
+            f"{first}&ws.start=300": {
+                "entries": [{"self_link": f"{API}/ubuntu/+source/apt"}],
+            },
+        }
+        with mock.patch.object(lpbugs, "_cached_json",
+                               side_effect=lambda url: pages[url]):
+            packages = lpbugs.subscribed_packages("foundations-bugs")
+        self.assertEqual(packages, ["apt", "glibc"])
+
+
 class TestSync(unittest.TestCase):
     def setUp(self):
         self.conn = db.connect(Path(":memory:"))

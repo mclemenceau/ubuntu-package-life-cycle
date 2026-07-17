@@ -13,7 +13,7 @@ local cache:
 
 | Question | Source |
 |---|---|
-| Which packages does my team own? | `package-team-mapping.json` (ubuntu-archive-team.ubuntu.com) |
+| Which packages does my team own? | Launchpad `getBugSubscriberPackages` (one call per ingest; `package-team-mapping.json` as fallback — the public copy froze in May 2025) |
 | Why is something stuck in -proposed? | `update_excuses.yaml.xz` (proposed-migration) |
 | What version is where? | `Sources.xz` from archive.ubuntu.com (devel) and deb.debian.org (unstable) |
 | Merge metadata | merges.ubuntu.com (optional; degrades to Sources comparison when unreachable) |

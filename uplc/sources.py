@@ -37,7 +37,12 @@ UBUNTU_COMPONENTS = ["main", "universe", "restricted", "multiverse"]
 
 
 def team_packages(team: str) -> list[str]:
-    """Source packages a team is subscribed to, from package-team-mapping."""
+    """Source packages a team is subscribed to, from package-team-mapping.
+
+    Fallback only: lpbugs.subscribed_packages is the authoritative source.
+    The .apw copy this usually resolves to froze in May 2025, and the
+    primary redirects to static-reports.ubuntu.com (VPN-only).
+    """
     mapping = json.loads(fetch_first(TEAM_MAPPING_URLS, timeout=30))
     if team not in mapping:
         raise KeyError(

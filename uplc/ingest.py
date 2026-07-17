@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from . import db, sources
+from . import db, lpbugs, sources
+from .fetch import SourceUnavailable
 from .state import PackageState, derive_all
 
 log = logging.getLogger("uplc.ingest")
@@ -44,8 +45,13 @@ def run_ingest(team: str, db_path: Path | None = None) -> IngestResult:
     series = devel_series()
     log.info("ingesting team=%s series=%s", team, series)
 
-    log.info("fetching team package mapping ...")
-    packages = sources.team_packages(team)
+    log.info("fetching team package list from Launchpad ...")
+    try:
+        packages = lpbugs.subscribed_packages(team)
+    except SourceUnavailable as err:
+        log.warning("Launchpad package list unavailable (%s); falling back "
+                    "to package-team-mapping (frozen May 2025)", err)
+        packages = sources.team_packages(team)
     log.info("%d packages subscribed by %s", len(packages), team)
 
     log.info("fetching + parsing proposed-migration excuses "

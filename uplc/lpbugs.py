@@ -1,10 +1,12 @@
-"""Gentle Launchpad bug ingester — the only sanctioned LP API use.
+"""Gentle Launchpad client — the only sanctioned LP API use.
 
 One anonymous searchTasks per sync (structural_subscriber plus a
 modified_since watermark) discovers which bugs changed; each of those is
 then fetched by ID through the conditional-GET cache. Pipeline-referenced
 bugs (block-proposed / update-excuse) are fetched by ID too. Never
-per-package polling.
+per-package polling. The team's package list also comes from here (one
+getBugSubscriberPackages call): the published package-team-mapping.json
+fallback copy froze in May 2025, so LP is the only accurate source.
 
 First sync is deliberately heavy — every bug touched since
 FIRST_SYNC_SINCE, whatever its status — after that every run is a
@@ -144,6 +146,32 @@ def parse_bug(entry: dict) -> dict:
         "date_last_updated": entry.get("date_last_updated") or "",
         "heat": entry.get("heat", 0),
     }
+
+
+def parse_subscriber_packages(entries: list[dict]) -> list[str]:
+    """getBugSubscriberPackages entries -> sorted Ubuntu source packages."""
+    packages = set()
+    for entry in entries:
+        target = parse_target(entry.get("self_link") or "")
+        if target and target[0]:
+            packages.add(target[0])
+    return sorted(packages)
+
+
+def subscribed_packages(team: str) -> list[str]:
+    """Source packages *team* is a bug subscriber for, straight from LP.
+
+    One paginated call per ingest, through the conditional-GET cache so
+    an unreachable LP degrades to the last-fetched list.
+    """
+    url = f"{LP_API}/~{team}?" + urllib.parse.urlencode(
+        [("ws.op", "getBugSubscriberPackages"), ("ws.size", "300")])
+    entries: list[dict] = []
+    while url:
+        data = _cached_json(url)
+        entries.extend(data.get("entries", []))
+        url = data.get("next_collection_link")
+    return parse_subscriber_packages(entries)
 
 
 def search_tasks(
