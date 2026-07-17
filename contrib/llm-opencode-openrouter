@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Example UPLC_LLM_CMD runner: opencode CLI over an OpenRouter model.
+
+Honours the uplc digest runner contract: prompt as the last argument,
+facts JSON on stdin, Markdown on stdout, exit 0 on success. Use this when
+the box has `opencode` installed and logged in to OpenRouter
+(`opencode providers login`) rather than a `claude` login or a raw
+Anthropic API key:
+
+    export UPLC_LLM_MODEL=openrouter/~anthropic/claude-sonnet-latest
+    UPLC_LLM_CMD=contrib/llm-opencode-openrouter uplc digest -o digests/
+
+`opencode run` takes the message as positional argv, not stdin, so this
+wrapper folds the facts JSON into the same message it sends opencode and
+asks for `--format json` (newline-delimited event stream) so it can pull
+out just the assistant's text and print that — nothing else — to stdout.
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+MODEL = os.environ.get("UPLC_LLM_MODEL", "openrouter/~anthropic/claude-sonnet-latest")
+TIMEOUT = float(os.environ.get("UPLC_LLM_TIMEOUT", "280"))
+
+prompt = sys.argv[1]
+facts = sys.stdin.read()
+message = f"{prompt}\n\n{facts}"
+
+proc = subprocess.run(
+    ["opencode", "run", "--format", "json", "-m", MODEL, message],
+    capture_output=True, text=True, timeout=TIMEOUT)
+if proc.returncode != 0:
+    sys.stderr.write(proc.stderr)
+    sys.exit(proc.returncode)
+
+# One entry per text part, keyed by part id so a part updated more than
+# once (streaming) only keeps its latest (complete) text.
+texts = {}
+order = []
+for line in proc.stdout.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    event = json.loads(line)
+    if event.get("type") != "text":
+        continue
+    part = event["part"]
+    pid = part["id"]
+    if pid not in texts:
+        order.append(pid)
+    texts[pid] = part.get("text", "")
+
+print("".join(texts[pid] for pid in order))
