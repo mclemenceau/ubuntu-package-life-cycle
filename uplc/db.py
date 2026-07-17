@@ -71,6 +71,17 @@ CREATE TABLE IF NOT EXISTS bug_sync (
     bug_count INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_bug_tasks_package ON bug_tasks(package);
+CREATE TABLE IF NOT EXISTS digest_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ran_at TEXT NOT NULL,               -- UTC ISO-8601
+    team TEXT NOT NULL,
+    since_iso TEXT NOT NULL,            -- window covered by this digest
+    until_iso TEXT NOT NULL,
+    date TEXT NOT NULL,                 -- YYYY-MM-DD the digest is "for"
+    bug_count INTEGER,
+    used_llm INTEGER,                   -- 0/1
+    body TEXT                           -- final markdown
+);
 """
 
 # Launchpad statuses that count as "open" everywhere in uplc.
@@ -267,6 +278,75 @@ def bugs_with_tasks(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         " b.origin, t.package, t.series, t.status, t.importance, t.assignee,"
         " t.date_closed FROM bugs b JOIN bug_tasks t ON t.bug_id = b.id"
         " ORDER BY b.id").fetchall()
+
+
+def bugs_modified_since(
+    conn: sqlite3.Connection, since_iso: str,
+) -> list[sqlite3.Row]:
+    """Bug tasks joined with bugs whose bug changed after `since_iso`.
+
+    Strictly after: `since_iso` is the previous digest's end watermark,
+    already covered, so consecutive windows tile without duplicates.
+    """
+    return conn.execute(
+        "SELECT b.id, b.title, b.tags, b.date_created, b.date_last_updated,"
+        " b.heat, b.origin, t.package, t.series, t.status, t.importance,"
+        " t.assignee, t.date_created AS task_created, t.date_closed"
+        " FROM bugs b JOIN bug_tasks t ON t.bug_id = b.id"
+        " WHERE b.date_last_updated > ? ORDER BY b.id",
+        (since_iso,)).fetchall()
+
+
+def transitions_between(
+    conn: sqlite3.Connection, since_iso: str, until_iso: str,
+) -> list[sqlite3.Row]:
+    """State transitions first observed inside the (since, until] window."""
+    return conn.execute(
+        "SELECT package, from_state, to_state, last_seen_old, first_seen_new"
+        " FROM transitions WHERE first_seen_new > ? AND first_seen_new <= ?"
+        " ORDER BY id", (since_iso, until_iso)).fetchall()
+
+
+def record_digest_run(
+    conn: sqlite3.Connection,
+    *,
+    team: str,
+    since_iso: str,
+    until_iso: str,
+    date: str,
+    bug_count: int,
+    used_llm: bool,
+    body: str,
+) -> int:
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    cur = conn.execute(
+        "INSERT INTO digest_runs (ran_at, team, since_iso, until_iso, date,"
+        " bug_count, used_llm, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (now, team, since_iso, until_iso, date, bug_count,
+         1 if used_llm else 0, body))
+    conn.commit()
+    return cur.lastrowid
+
+
+def latest_digest_run(conn: sqlite3.Connection, team: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM digest_runs WHERE team = ? ORDER BY id DESC LIMIT 1",
+        (team,)).fetchone()
+
+
+def digest_runs(
+    conn: sqlite3.Connection, team: str, limit: int | None = None,
+) -> list[sqlite3.Row]:
+    """Digest history newest-first, one row per date (last rerun wins).
+
+    With `limit=None` returns the full history for the archive page; feeds
+    slice what they need.
+    """
+    rows = conn.execute(
+        "SELECT * FROM digest_runs WHERE team = ? AND id IN ("
+        "  SELECT MAX(id) FROM digest_runs WHERE team = ? GROUP BY date)"
+        " ORDER BY date DESC", (team, team)).fetchall()
+    return rows[:limit] if limit is not None else rows
 
 
 def bug_count(conn: sqlite3.Connection) -> int:
