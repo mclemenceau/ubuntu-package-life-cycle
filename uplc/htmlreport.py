@@ -102,15 +102,24 @@ _CSS = """
 .uplc .tile .value { font-size: 30px; font-weight: 600; margin-top: 2px; }
 .uplc .tile .value a { color: inherit; text-decoration: none; }
 .uplc .tile .hint { font-size: 12px; color: var(--muted); }
-.uplc .funnel { display: grid; grid-template-columns: max-content 1fr;
-  gap: 6px 12px; align-items: center; }
-.uplc .funnel .name { font-size: 13px; color: var(--ink-2);
-  text-align: right; white-space: nowrap; }
-.uplc .funnel .track { position: relative; height: 20px; white-space: nowrap; }
-.uplc .funnel .fill { height: 20px; background: var(--bar);
-  border-radius: 0 4px 4px 0; display: inline-block; vertical-align: top; }
-.uplc .funnel .val { font-size: 13px; color: var(--ink);
-  margin-left: 8px; vertical-align: top; line-height: 20px; }
+.uplc .flow svg.diagram { width: 100%; height: auto; display: block;
+  overflow: visible; }
+.uplc .flow svg.diagram text { font: 11px system-ui, -apple-system, sans-serif;
+  fill: var(--ink-2); }
+.uplc .flow text.count { font-weight: 700; fill: var(--ink); font-size: 14px; }
+.uplc .flow text.node-label { font-size: 11px; }
+.uplc .flow text.sub-label { font-size: 9px; fill: var(--muted); }
+.uplc .flow .node-shape { fill: var(--surface); stroke: var(--border);
+  stroke-width: 1.5; }
+.uplc .flow .node-shape.hub { stroke: var(--bar); stroke-width: 2; }
+.uplc .flow .node-shape.dashed { stroke-dasharray: 4 3; }
+.uplc .flow .node a { cursor: pointer; }
+.uplc .flow .node.dim .node-shape, .uplc .flow .node.dim text { opacity: .28; }
+.uplc .flow .edge { fill: none; stroke: var(--muted); opacity: .5;
+  stroke-linecap: round; }
+.uplc .flow .edge.dim { opacity: .08; }
+.uplc .flow .pin rect { fill: var(--ink); }
+.uplc .flow .flow-controls { margin-bottom: 14px; }
 .uplc .trend { display: grid; grid-template-columns: max-content 1fr;
   gap: 8px 12px; align-items: center; margin-top: 10px; }
 .uplc .trend .name { font-size: 13px; color: var(--ink-2);
@@ -425,6 +434,86 @@ _BUGS_JS = """
 })();
 """
 
+# --- Overview flow diagram script: highlight a searched package's node. ---
+_FLOW_JS = """
+(function () {
+  var svg = document.getElementById('flow-svg');
+  var input = document.getElementById('flow-search');
+  if (!svg || !input) return;
+  var idx = JSON.parse(document.getElementById('flow-pkg-index').textContent);
+  var nodeFor = JSON.parse(document.getElementById('flow-node-map').textContent);
+  var nodes = {};
+  Array.prototype.forEach.call(svg.querySelectorAll('[data-node]'), function (g) {
+    nodes[g.getAttribute('data-node')] = g;
+  });
+  var pin = null;
+
+  function clear() {
+    Object.keys(nodes).forEach(function (id) { nodes[id].classList.remove('dim'); });
+    Array.prototype.forEach.call(svg.querySelectorAll('.edge'), function (e) {
+      e.classList.remove('dim');
+    });
+    if (pin) { pin.remove(); pin = null; }
+  }
+
+  function addPin(nodeId, pkg) {
+    var n = nodes[nodeId], bb = n.getBBox();
+    var x = bb.x + bb.width / 2, y = bb.y - 10;
+    var text = '\\u25cf ' + pkg;
+    var w = 16 + text.length * 6.3;
+    var NS = 'http://www.w3.org/2000/svg';
+    var g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'pin');
+    var rect = document.createElementNS(NS, 'rect');
+    rect.setAttribute('x', x - w / 2); rect.setAttribute('y', y - 20);
+    rect.setAttribute('width', w); rect.setAttribute('height', 18);
+    rect.setAttribute('rx', 5);
+    var tri = document.createElementNS(NS, 'polygon');
+    tri.setAttribute('points',
+      (x - 5) + ',' + (y - 2) + ' ' + (x + 5) + ',' + (y - 2) + ' ' + x + ',' + (y + 3));
+    tri.style.fill = 'var(--ink)';
+    var t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', x); t.setAttribute('y', y - 7);
+    t.setAttribute('text-anchor', 'middle');
+    t.style.fill = 'var(--page)';
+    t.textContent = text;
+    g.appendChild(rect); g.appendChild(tri); g.appendChild(t);
+    svg.appendChild(g);
+    pin = g;
+  }
+
+  function apply(updateHash) {
+    var pkg = input.value.trim();
+    clear();
+    var state = idx[pkg];
+    var nodeId = state ? nodeFor[state] : null;
+    if (nodeId && nodes[nodeId]) {
+      Object.keys(nodes).forEach(function (id) {
+        if (id !== nodeId) nodes[id].classList.add('dim');
+      });
+      Array.prototype.forEach.call(svg.querySelectorAll('.edge'), function (e) {
+        var f = e.getAttribute('data-from'), t = e.getAttribute('data-to');
+        if (f !== nodeId && t !== nodeId) e.classList.add('dim');
+      });
+      addPin(nodeId, pkg);
+    }
+    if (updateHash) {
+      history.replaceState(null, '',
+        pkg ? '#pkg=' + encodeURIComponent(pkg) : location.pathname);
+    }
+  }
+
+  input.addEventListener('input', function () { apply(true); });
+  input.addEventListener('change', function () { apply(true); });
+
+  var hash = decodeURIComponent(location.hash.slice(1));
+  if (hash.indexOf('pkg=') === 0) {
+    input.value = hash.slice(4);
+    apply(false);
+  }
+})();
+"""
+
 
 def _e(text) -> str:
     return html.escape(str(text or ""))
@@ -495,20 +584,237 @@ def _days_since(iso: str | None) -> float | None:
     return (datetime.now(timezone.utc) - then).total_seconds() / 86400
 
 
-def _funnel(counts: Counter) -> str:
-    rows = [(STATE_LABELS[s], counts[s]) for s in STATES if counts.get(s)]
-    if not rows:
-        return '<p class="empty">no data</p>'
-    peak = max(n for _, n in rows)
-    cells = []
-    for name, n in rows:
-        # Cap at 92% so the value label always fits beside the bar.
-        width = max(2.0, 92.0 * n / peak)
-        cells.append(f'<div class="name">{_e(name)}</div>')
-        cells.append(
-            f'<div class="track"><span class="fill" style="width:{width:.1f}%">'
-            f'</span><span class="val">{n}</span></div>')
-    return f'<div class="card funnel">{"".join(cells)}</div>'
+# --------------------------------------------------------------------------
+# Flow diagram (index.html) — Debian delta -> proposed-migration -> Devel,
+# drawn from the live snapshot. The layout (positions, shapes) is fixed;
+# only counts/widths/radii are data-driven, so the diagram's shape stays
+# stable run over run even as populations shift.
+
+_FLOW_NODES = {
+    "debian": {"shape": "circle", "x": 60, "y": 236, "r": 28,
+               "label": "Debian", "states": None},
+    "merge-needed": {"shape": "rect", "x": 190, "y": 84, "w": 170, "h": 56,
+                      "states": ["merge-needed"]},
+    "sync-available": {"shape": "rect", "x": 190, "y": 346, "w": 170, "h": 56,
+                        "states": ["sync-available"]},
+    "proposed": {"shape": "rect", "x": 430, "y": 172, "w": 150, "h": 108,
+                 "label": "Proposed", "hub": True,
+                 "states": [s for s in STATES if s in PROPOSED_STATES]},
+    "blocked-build": {"shape": "rect", "x": 650, "y": 12, "w": 180, "h": 50,
+                       "states": ["blocked-build"]},
+    "blocked-tests": {"shape": "rect", "x": 650, "y": 78, "w": 180, "h": 50,
+                       "states": ["blocked-tests"]},
+    "blocked-depends": {"shape": "rect", "x": 650, "y": 144, "w": 180, "h": 50,
+                         "states": ["blocked-depends"]},
+    "blocked-other": {"shape": "rect", "x": 650, "y": 210, "w": 180, "h": 50,
+                       "states": ["blocked-other"]},
+    "waiting-age": {"shape": "rect", "x": 650, "y": 276, "w": 180, "h": 50,
+                     "states": ["waiting-age"]},
+    "ready-to-migrate": {"shape": "rect", "x": 650, "y": 342, "w": 180,
+                          "h": 50, "states": ["ready-to-migrate"]},
+    "devel-hub": {"shape": "circle", "x": 930, "y": 228,
+                  "label": "Devel", "states": ["in-sync", "ubuntu-only"]},
+    "not-in-devel": {"shape": "circle", "x": 95, "y": 420, "r": 22,
+                      "states": ["not-in-devel"], "dashed": True},
+}
+
+# (from, to, state whose count sizes the ribbon, is-a-retry-loop)
+_FLOW_EDGES = [
+    ("debian", "merge-needed", "merge-needed", False),
+    ("debian", "sync-available", "sync-available", False),
+    ("merge-needed", "proposed", "merge-needed", False),
+    ("sync-available", "proposed", "sync-available", False),
+    ("proposed", "blocked-build", "blocked-build", False),
+    ("proposed", "blocked-tests", "blocked-tests", False),
+    ("proposed", "blocked-depends", "blocked-depends", False),
+    ("proposed", "blocked-other", "blocked-other", False),
+    ("proposed", "waiting-age", "waiting-age", False),
+    ("proposed", "ready-to-migrate", "ready-to-migrate", False),
+    ("ready-to-migrate", "devel-hub", "ready-to-migrate", False),
+    ("blocked-build", "proposed", "blocked-build", True),
+    ("blocked-tests", "proposed", "blocked-tests", True),
+    ("blocked-depends", "proposed", "blocked-depends", True),
+    ("blocked-other", "proposed", "blocked-other", True),
+]
+
+# States that flow through a ribbon of their own (excludes the two devel
+# states, which only size devel-hub itself, and not-in-devel, which is
+# disconnected) — used to keep ribbon widths relative to each other.
+_FLOW_RIBBON_STATES = [s for s in STATES
+                        if s not in ("in-sync", "ubuntu-only", "not-in-devel")]
+
+
+def _flow_radius(count: int, base: float = 20.0, k: float = 4.2,
+                  cap: float = 64.0) -> float:
+    return min(cap, base + (count ** 0.5) * k)
+
+
+def _flow_width(count: int, peak: int, cap: float = 30.0) -> float:
+    if peak <= 0:
+        return 2.5
+    return max(2.5, min(cap, cap * count / peak))
+
+
+def _flow_resolve(counts: Counter) -> dict:
+    """Copy _FLOW_NODES with circle radii filled in from live counts."""
+    resolved = {}
+    for node_id, spec in _FLOW_NODES.items():
+        spec = dict(spec)
+        if spec["shape"] == "circle" and "r" not in spec:
+            states = spec.get("states") or []
+            count = sum(counts.get(s, 0) for s in states)
+            spec["r"] = _flow_radius(count)
+        resolved[node_id] = spec
+    return resolved
+
+
+def _flow_anchor(spec: dict, side: str) -> tuple[float, float]:
+    if spec["shape"] == "circle":
+        cy = spec["y"]
+        return (spec["x"] - spec["r"], cy) if side == "left" \
+            else (spec["x"] + spec["r"], cy)
+    cy = spec["y"] + spec["h"] / 2
+    return (spec["x"], cy) if side == "left" else (spec["x"] + spec["w"], cy)
+
+
+def _flow_node_svg(node_id: str, spec: dict, counts: Counter) -> str:
+    states = spec.get("states")
+    count = sum(counts.get(s, 0) for s in states) if states else None
+    label = spec.get("label") or (STATE_LABELS[states[0]] if states else "")
+    sub = ""
+    if states and len(states) == 2 and not spec.get("hub"):
+        sub = " + ".join(f"{counts.get(s, 0)} {STATE_LABELS[s].lower()}"
+                          for s in states)
+
+    if spec.get("hub"):
+        color = "var(--bar)"
+    elif not states:
+        color = "var(--muted)"
+    elif node_id == "devel-hub":
+        color = "var(--good)"
+    else:
+        color = _state_color(states[0])
+
+    classes = ["node-shape"]
+    if spec.get("hub"):
+        classes.append("hub")
+    if spec.get("dashed"):
+        classes.append("dashed")
+    # Circles carry their status as a stroke color; rects use the left tab
+    # below instead, so the border stays the shared neutral card border.
+    style = (f' style="stroke:{color}"'
+             if spec["shape"] == "circle" and (spec.get("dashed") or states)
+             else "")
+
+    if spec["shape"] == "circle":
+        r = spec["r"]
+        shape_svg = (f'<circle cx="{spec["x"]}" cy="{spec["y"]}" r="{r:.1f}" '
+                     f'class="{" ".join(classes)}"{style}></circle>')
+        cx = spec["x"]
+        lines = []
+        if count is not None:
+            lines.append((count, "count"))
+        lines.append((label, "node-label"))
+        if sub:
+            lines.append((sub, "sub-label"))
+        start_y = spec["y"] - ((len(lines) - 1) * 13) / 2 + 4
+        # html.escape (not _e — its `or ""` would blank out a count of 0)
+        text_svg = "".join(
+            f'<text x="{cx}" y="{start_y + i * 13:.1f}" text-anchor="middle" '
+            f'class="{cls}">{html.escape(str(v))}</text>'
+            for i, (v, cls) in enumerate(lines))
+    else:
+        tab = (f'<rect x="{spec["x"]}" y="{spec["y"]}" width="5" '
+               f'height="{spec["h"]}" rx="2.5" fill="{color}"></rect>'
+               if not spec.get("hub") and states else "")
+        shape_svg = (f'<rect x="{spec["x"]}" y="{spec["y"]}" '
+                     f'width="{spec["w"]}" height="{spec["h"]}" rx="10" '
+                     f'class="{" ".join(classes)}"{style}></rect>{tab}')
+        cx = spec["x"] + spec["w"] / 2
+        cy = spec["y"] + spec["h"] / 2
+        text_svg = (
+            f'<text x="{cx}" y="{cy - 4}" text-anchor="middle" '
+            f'class="node-label">{_e(label)}</text>'
+            f'<text x="{cx}" y="{cy + 15}" text-anchor="middle" '
+            f'class="count">{count if count is not None else ""}</text>')
+
+    inner = f'<g class="node" data-node="{node_id}">{shape_svg}{text_svg}</g>'
+    if states:
+        href = f'packages.html#s={",".join(states)}'
+        return f'<a href="{href}">{inner}</a>'
+    return inner
+
+
+def _flow_edges_svg(counts: Counter, nodes: dict) -> str:
+    peak = max((counts.get(s, 0) for s in _FLOW_RIBBON_STATES), default=1) or 1
+    # Retry edges all return to the same hub — if they all landed on its
+    # single right-anchor point they'd stack on top of each other, so
+    # spread their landing points along the hub's right edge instead.
+    retry_order = [e[0] for e in _FLOW_EDGES if e[3]]
+    paths = []
+    for from_id, to_id, state, retry in _FLOW_EDGES:
+        f, t = nodes[from_id], nodes[to_id]
+        count = counts.get(state, 0)
+        color = _state_color(state)
+        # Same monotonic S-curve (control points at the shared x midpoint,
+        # each at its own endpoint's y) as the forward ribbons below — it
+        # never loops back on itself. The retry loop's control-point math
+        # used to diverge from this and produced a self-intersecting curve
+        # that rendered as a solid rosette once dashed.
+        if retry:
+            width = _flow_width(count, peak, cap=8.0)
+            x1, y1 = _flow_anchor(f, "left")
+            idx = retry_order.index(from_id)
+            x2 = t["x"] + t["w"]
+            y2 = t["y"] + t["h"] * (idx + 1) / (len(retry_order) + 1)
+            dash_len, gap_len = width * 2.2, width * 1.6
+            extra = f";stroke-dasharray:{dash_len:.1f} {gap_len:.1f}"
+            cls = ' class="edge dashed"'
+        else:
+            width = _flow_width(count, peak)
+            x1, y1 = _flow_anchor(f, "right")
+            x2, y2 = _flow_anchor(t, "left")
+            extra = ""
+            cls = ' class="edge"'
+        mx = (x1 + x2) / 2
+        d = f"M {x1},{y1} C {mx},{y1} {mx},{y2} {x2},{y2}"
+        paths.append(
+            f'<path d="{d}"{cls} style="stroke:{color};stroke-width:'
+            f'{width:.1f}{extra}" data-from="{from_id}" data-to="{to_id}"></path>')
+    return "".join(paths)
+
+
+def _flow(counts: Counter, snaps) -> str:
+    resolved = _flow_resolve(counts)
+    edges_svg = _flow_edges_svg(counts, resolved)
+    nodes_svg = "".join(_flow_node_svg(nid, spec, counts)
+                         for nid, spec in resolved.items())
+    svg = (f'<svg class="diagram" viewBox="0 0 1010 460" '
+           f'id="flow-svg">{edges_svg}{nodes_svg}</svg>')
+
+    pkg_names = sorted(s["package"] for s in snaps)
+    pkg_index = {s["package"]: s["state"] for s in snaps}
+    node_for_state = {s: nid for nid, spec in _FLOW_NODES.items()
+                       for s in (spec.get("states") or [])}
+    datalist = "".join(f"<option>{_e(p)}</option>" for p in pkg_names)
+    controls = f"""<div class="filters flow-controls">
+<input id="flow-search" type="search" list="flow-pkglist"
+ placeholder="track a package…" aria-label="track a package">
+<datalist id="flow-pkglist">{datalist}</datalist>
+</div>"""
+
+    # Package names are archive-sourced, not literal constants — neutralize
+    # any accidental "</script>" sequence before inlining as JSON.
+    def _json_script(obj):
+        return json.dumps(obj).replace("</", "<\\/")
+
+    return f"""<div class="flow">
+{controls}
+<div class="card">{svg}</div>
+</div>
+<script type="application/json" id="flow-pkg-index">{_json_script(pkg_index)}</script>
+<script type="application/json" id="flow-node-map">{_json_script(node_for_state)}</script>
+<script>{_FLOW_JS}</script>"""
 
 
 def _footer(extra: str = "") -> str:
@@ -627,8 +933,8 @@ def render_index(conn: sqlite3.Connection, team: str) -> str:
 <div class="meta">{_e(run['series'])} series · snapshot {_e(run['ran_at'])}
  · excuses generated {_e(run['excuses_generated'])}</div>
 <div class="tiles">{''.join(tiles)}</div>
-<h2>Funnel</h2>
-{_funnel(counts)}
+<h2>Pipeline flow</h2>
+{_flow(counts, snaps)}
 <h2>In proposed-migration ({in_proposed})</h2>
 {_pipeline_table(conn, snaps)}
 <h2>Behind Debian ({behind})</h2>

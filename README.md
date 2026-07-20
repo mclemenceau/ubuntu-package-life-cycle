@@ -50,8 +50,14 @@ $ python3 -m uplc serve             # serve the dashboard on localhost
 The dashboard is a self-contained static site (inline CSS/JS, no external
 requests) with five interconnected pages:
 
-- **index.html** — manager overview: tiles, funnel, proposed pipeline,
-  biggest unblock opportunities.
+![Overview page: tiles plus a Debian → proposed-migration → Devel flow diagram, with a package search box above it](docs/img/overview-flow.png)
+
+- **index.html** — manager overview: tiles, a Debian → proposed-migration →
+  Devel flow diagram (ribbon width and circle size scaled to the live
+  snapshot counts, dashed retry loops for blocked states), proposed
+  pipeline, biggest unblock opportunities. Every node in the flow links to
+  the matching filtered view on packages.html; a search box above the
+  diagram tracks one package's node directly (`#pkg=<name>`, shareable).
 - **packages.html** — every team package with client-side filters (state,
   bug counts, time in state, free text) and sortable columns; each row
   expands to detail plus out-links (Launchpad, excuses, Debian tracker).
