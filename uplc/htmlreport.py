@@ -122,17 +122,6 @@ _CSS = """
 .uplc .flow .edge.dim { opacity: .08; }
 .uplc .flow .pin rect { fill: var(--ink); }
 .uplc .flow .flow-controls { margin-bottom: 14px; }
-.uplc .trend { display: grid; grid-template-columns: max-content 1fr;
-  gap: 8px 12px; align-items: center; margin-top: 10px; }
-.uplc .trend .name { font-size: 13px; color: var(--ink-2);
-  text-align: right; white-space: nowrap; }
-.uplc .trend .track { position: relative; height: 14px; white-space: nowrap; }
-.uplc .trend .track + .track { margin-top: 2px; }
-.uplc .trend .fill { height: 14px; background: var(--bar);
-  border-radius: 0 4px 4px 0; display: inline-block; vertical-align: top; }
-.uplc .trend .fill.f2 { background: var(--bar2); }
-.uplc .trend .val { font-size: 12px; color: var(--ink);
-  margin-left: 6px; vertical-align: top; line-height: 14px; }
 .uplc .legend { display: flex; gap: 18px; font-size: 12.5px;
   color: var(--ink-2); }
 .uplc .sw { display: inline-block; width: 10px; height: 10px;
@@ -892,50 +881,6 @@ def _footer(extra: str = "") -> str:
 # --------------------------------------------------------------------------
 # Overview page (index.html)
 
-def _pipeline_table(conn: sqlite3.Connection, snaps) -> str:
-    rows = []
-    for s in sorted(snaps, key=lambda r: (STATES.index(r["state"]), r["package"])):
-        if s["state"] not in PROPOSED_STATES:
-            continue
-        detail = json.loads(s["detail"] or "{}")
-        bugs = " ".join(_bug_link(b) for b in detail.get("bugs", []))
-        rows.append(
-            "<tr>"
-            f'<td class="pkg">{_pkg_anchor(s["package"])}</td>'
-            f"<td>{_chip(s['state'])}</td>"
-            f'<td class="ver">{_e(s["ubuntu_version"])} → '
-            f'{_e(s["proposed_version"])}</td>'
-            f'<td class="num">{_e(_age_str(db.state_entered_at(conn, s["package"])))}</td>'
-            f'<td class="why">{_e(s["summary"])}{" · " + bugs if bugs else ""}</td>'
-            "</tr>")
-    if not rows:
-        return '<p class="empty">nothing in -proposed right now</p>'
-    return ('<div class="card scroll"><table>'
-            "<tr><th>Package</th><th>State</th><th>Version</th>"
-            "<th>Seen</th><th>Why</th></tr>"
-            + "".join(rows) + "</table></div>")
-
-
-def _delta_table(snaps) -> str:
-    rows = []
-    for s in snaps:
-        if s["state"] not in ("merge-needed", "sync-available"):
-            continue
-        rows.append(
-            "<tr>"
-            f'<td class="pkg">{_pkg_anchor(s["package"])}</td>'
-            f"<td>{_chip(s['state'])}</td>"
-            f'<td class="ver">{_e(s["ubuntu_version"])}</td>'
-            f'<td class="ver">{_e(s["debian_version"])}</td>'
-            "</tr>")
-    if not rows:
-        return '<p class="empty">everything is current vs Debian unstable</p>'
-    return ('<div class="card scroll"><table>'
-            "<tr><th>Package</th><th>Action</th><th>Ubuntu devel</th>"
-            "<th>Debian unstable</th></tr>"
-            + "".join(rows) + "</table></div>")
-
-
 def _blockers_table(snaps) -> str:
     team = {s["package"] for s in snaps}
     fan: Counter = Counter()
@@ -998,10 +943,6 @@ def render_index(conn: sqlite3.Connection, team: str) -> str:
 <div class="tiles">{''.join(tiles)}</div>
 <h2>Pipeline flow</h2>
 {_flow(conn, counts, snaps)}
-<h2>In proposed-migration ({in_proposed})</h2>
-{_pipeline_table(conn, snaps)}
-<h2>Behind Debian ({behind})</h2>
-{_delta_table(snaps)}
 {_blockers_table(snaps)}
 {_footer("No Launchpad API calls beyond the watermarked bug sync.")}
 </div></div>
@@ -1267,41 +1208,6 @@ def _gating_table(refs: dict[int, list], by_id: dict[int, dict]) -> str:
             + "".join(rows) + "</table></div>")
 
 
-def _trend_chart(bugs: list[dict]) -> str:
-    now = datetime.now(timezone.utc)
-    opened: Counter = Counter()
-    closed: Counter = Counter()
-    prefix = f"{now.year}-"
-    for b in bugs:
-        if (b["created"] or "").startswith(prefix):
-            opened[int(b["created"][5:7])] += 1
-        if (b["closed"] or "").startswith(prefix):
-            closed[int(b["closed"][5:7])] += 1
-    months = range(1, now.month + 1)
-    peak = max([opened[m] for m in months] + [closed[m] for m in months] + [1])
-    cells = []
-    for m in months:
-        name = datetime(now.year, m, 1).strftime("%b")
-        cells.append(f'<div class="name">{name}</div><div>')
-        for cls, n in (("", opened[m]), (" f2", closed[m])):
-            width = 92.0 * n / peak
-            cells.append(
-                f'<div class="track"><span class="fill{cls}"'
-                f' style="width:{width:.1f}%"></span>'
-                f'<span class="val">{n}</span></div>')
-        cells.append("</div>")
-    return (f"<h2>Opened vs closed, {now.year}</h2>"
-            '<div class="card">'
-            '<div class="legend">'
-            '<span><span class="sw" style="background:var(--bar)"></span>'
-            "opened</span>"
-            '<span><span class="sw" style="background:var(--bar2)"></span>'
-            "closed</span></div>"
-            f'<div class="trend">{"".join(cells)}</div>'
-            "<p class=\"empty\">Counted from Launchpad bug dates, so the "
-            "history is complete even before uplc started syncing.</p></div>")
-
-
 def render_bugs(conn: sqlite3.Connection, team: str) -> str:
     sync = db.bug_sync_state(conn, team)
     bugs = _aggregate_bugs(conn)
@@ -1425,7 +1331,6 @@ increment.</p></div>
 <div class="tiles">{tiles}</div>
 {_gating_table(refs, by_id)}
 {_sru_table(sru_rows)}
-{_trend_chart(bugs)}
 <h2>All bugs ({len(bugs)})</h2>
 {filters}
 <div class="card scroll"><table id="btable">{header}<tbody>{''.join(rows)}</tbody></table></div>

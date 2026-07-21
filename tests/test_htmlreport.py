@@ -71,8 +71,9 @@ class TestRenderPages(unittest.TestCase):
 
     def test_index_links_packages_internally(self):
         page = htmlreport.render_index(self.conn, "foundations-bugs")
-        self.assertIn('href="packages.html#pkg-glibc"', page)
-        self.assertIn("https://launchpad.net/bugs/555", page)
+        self.assertIn('href="packages.html#s=', page)
+        self.assertNotIn("In proposed-migration", page)
+        self.assertNotIn("Behind Debian (", page)
 
     def test_packages_page_rows_and_anchors(self):
         _seed_bugs(self.conn)
@@ -112,7 +113,7 @@ class TestRenderPages(unittest.TestCase):
         self.assertIn("Gating the pipeline", page)
         self.assertIn("https://launchpad.net/bugs/555", page)
         self.assertIn('href="packages.html#pkg-grub2"', page)
-        self.assertIn("Opened vs closed", page)
+        self.assertNotIn("Opened vs closed", page)
         # Bug 600 closed in March 2026 shows up as closed this year.
         self.assertIn("Closed 2026", page)
         self.assertIn('data-open="0"', page)
