@@ -115,8 +115,10 @@ _CSS = """
 .uplc .flow .node-shape.dashed { stroke-dasharray: 4 3; }
 .uplc .flow .node a { cursor: pointer; }
 .uplc .flow .node.dim .node-shape, .uplc .flow .node.dim text { opacity: .28; }
-.uplc .flow .edge { fill: none; stroke: var(--muted); opacity: .5;
-  stroke-linecap: round; }
+.uplc .flow .edge { fill: none; stroke: var(--muted); opacity: .55;
+  stroke-width: 1.75; stroke-linecap: round; }
+.uplc .flow .edge.dashed { stroke: var(--critical); stroke-width: 2;
+  stroke-dasharray: 6 4; opacity: .75; }
 .uplc .flow .edge.dim { opacity: .08; }
 .uplc .flow .pin rect { fill: var(--ink); }
 .uplc .flow .flow-controls { margin-bottom: 14px; }
@@ -585,74 +587,72 @@ def _days_since(iso: str | None) -> float | None:
 
 
 # --------------------------------------------------------------------------
-# Flow diagram (index.html) — Debian delta -> proposed-migration -> Devel,
-# drawn from the live snapshot. The layout (positions, shapes) is fixed;
-# only counts/widths/radii are data-driven, so the diagram's shape stays
-# stable run over run even as populations shift.
+# Flow diagram (index.html) — a redraw of the team's own hand-sketched
+# pipeline (Debian -> Merge/Sync -> Upload -> Build -> Test -> Devel, with
+# a Sponsor input and FTBFS/Excuses retry loops back into Upload), drawn
+# from the live snapshot. The layout (positions, shapes) is fixed; only
+# counts/radii are data-driven, so the diagram's shape stays stable run
+# over run even as populations shift. Circle *area* (not radius) scales
+# with count so volumes compare fairly at a glance; Upload/Build/Test are
+# pass-through process steps with no state of their own, so they're sized
+# fixed and carry no count.
 
 _FLOW_NODES = {
-    "debian": {"shape": "circle", "x": 60, "y": 236, "r": 28,
+    "debian": {"shape": "circle", "x": 70, "y": 300, "r": 30,
                "label": "Debian", "states": None},
-    "merge-needed": {"shape": "rect", "x": 190, "y": 84, "w": 170, "h": 56,
+    "merge-needed": {"shape": "circle", "x": 250, "y": 170,
                       "states": ["merge-needed"]},
-    "sync-available": {"shape": "rect", "x": 190, "y": 346, "w": 170, "h": 56,
+    "sync-available": {"shape": "circle", "x": 250, "y": 430,
                         "states": ["sync-available"]},
-    "proposed": {"shape": "rect", "x": 430, "y": 172, "w": 150, "h": 108,
-                 "label": "Proposed", "hub": True,
-                 "states": [s for s in STATES if s in PROPOSED_STATES]},
-    "blocked-build": {"shape": "rect", "x": 650, "y": 12, "w": 180, "h": 50,
-                       "states": ["blocked-build"]},
-    "blocked-tests": {"shape": "rect", "x": 650, "y": 78, "w": 180, "h": 50,
-                       "states": ["blocked-tests"]},
-    "blocked-depends": {"shape": "rect", "x": 650, "y": 144, "w": 180, "h": 50,
-                         "states": ["blocked-depends"]},
-    "blocked-other": {"shape": "rect", "x": 650, "y": 210, "w": 180, "h": 50,
-                       "states": ["blocked-other"]},
-    "waiting-age": {"shape": "rect", "x": 650, "y": 276, "w": 180, "h": 50,
-                     "states": ["waiting-age"]},
-    "ready-to-migrate": {"shape": "rect", "x": 650, "y": 342, "w": 180,
-                          "h": 50, "states": ["ready-to-migrate"]},
-    "devel-hub": {"shape": "circle", "x": 930, "y": 228,
-                  "label": "Devel", "states": ["in-sync", "ubuntu-only"]},
-    "not-in-devel": {"shape": "circle", "x": 95, "y": 420, "r": 22,
+    "sponsor": {"shape": "circle", "x": 480, "y": 60, "r": 26,
+                "label": "Sponsor", "sub": "(not tracked yet)",
+                "states": None, "dashed": True},
+    "upload": {"shape": "diamond", "x": 480, "y": 300, "w": 100, "h": 100,
+               "label": "Upload", "hub": True, "states": None},
+    "build": {"shape": "diamond", "x": 650, "y": 300, "w": 100, "h": 100,
+              "label": "Build", "states": None},
+    "test": {"shape": "diamond", "x": 820, "y": 300, "w": 100, "h": 100,
+             "label": "Test", "sub": "ready + waiting-age",
+             "states": ["waiting-age", "ready-to-migrate"]},
+    "devel": {"shape": "circle", "x": 960, "y": 300, "label": "Devel",
+              "sub": "in-sync + Ubuntu-only",
+              "states": ["in-sync", "ubuntu-only"]},
+    "ftbfs": {"shape": "circle", "x": 650, "y": 490, "label": "FTBFS",
+              "sub": "= blocked-build", "states": ["blocked-build"]},
+    "excuses": {"shape": "circle", "x": 820, "y": 490, "label": "Excuses",
+                "sub": "tests + deps + other",
+                "states": ["blocked-tests", "blocked-depends",
+                           "blocked-other"]},
+    "not-in-devel": {"shape": "circle", "x": 70, "y": 490,
                       "states": ["not-in-devel"], "dashed": True},
 }
 
-# (from, to, state whose count sizes the ribbon, is-a-retry-loop)
-_FLOW_EDGES = [
-    ("debian", "merge-needed", "merge-needed", False),
-    ("debian", "sync-available", "sync-available", False),
-    ("merge-needed", "proposed", "merge-needed", False),
-    ("sync-available", "proposed", "sync-available", False),
-    ("proposed", "blocked-build", "blocked-build", False),
-    ("proposed", "blocked-tests", "blocked-tests", False),
-    ("proposed", "blocked-depends", "blocked-depends", False),
-    ("proposed", "blocked-other", "blocked-other", False),
-    ("proposed", "waiting-age", "waiting-age", False),
-    ("proposed", "ready-to-migrate", "ready-to-migrate", False),
-    ("ready-to-migrate", "devel-hub", "ready-to-migrate", False),
-    ("blocked-build", "proposed", "blocked-build", True),
-    ("blocked-tests", "proposed", "blocked-tests", True),
-    ("blocked-depends", "proposed", "blocked-depends", True),
-    ("blocked-other", "proposed", "blocked-other", True),
+# Forward edges (solid, arrowhead) and retry loops (dashed, critical-red).
+# The two "-> upload" retry edges use a bespoke loopback curve instead of
+# the generic path since they arc back past intervening nodes.
+_FLOW_EDGES_SOLID = [
+    ("debian", "merge-needed"), ("debian", "sync-available"),
+    ("merge-needed", "upload"), ("sync-available", "upload"),
+    ("sponsor", "upload"), ("upload", "build"), ("build", "test"),
+    ("test", "devel"),
 ]
+_FLOW_EDGES_LOOP = [("build", "ftbfs"), ("test", "excuses")]
+_FLOW_EDGES_RETURN = [("ftbfs", "upload"), ("excuses", "upload")]
 
-# States that flow through a ribbon of their own (excludes the two devel
-# states, which only size devel-hub itself, and not-in-devel, which is
-# disconnected) — used to keep ribbon widths relative to each other.
-_FLOW_RIBBON_STATES = [s for s in STATES
-                        if s not in ("in-sync", "ubuntu-only", "not-in-devel")]
+# The nodes that represent an actual holding pen (as opposed to Debian/
+# Devel bookends or the pass-through Upload/Build steps) get two extra
+# cues layered on top of size: a fill wash whose strength is volume
+# relative to the *other* holding pens (not the whole team, which would
+# wash everything out next to Devel's few hundred), and a border weight
+# that tracks how long packages have typically been stuck there — so a
+# node that's big AND stale reads as more urgent than one that's merely
+# big because a batch landed yesterday.
+_FLOW_HEAT_NODES = ["merge-needed", "sync-available", "test", "ftbfs", "excuses"]
 
 
 def _flow_radius(count: int, base: float = 20.0, k: float = 4.2,
                   cap: float = 64.0) -> float:
     return min(cap, base + (count ** 0.5) * k)
-
-
-def _flow_width(count: int, peak: int, cap: float = 30.0) -> float:
-    if peak <= 0:
-        return 2.5
-    return max(2.5, min(cap, cap * count / peak))
 
 
 def _flow_resolve(counts: Counter) -> dict:
@@ -669,28 +669,73 @@ def _flow_resolve(counts: Counter) -> dict:
 
 
 def _flow_anchor(spec: dict, side: str) -> tuple[float, float]:
-    if spec["shape"] == "circle":
-        cy = spec["y"]
-        return (spec["x"] - spec["r"], cy) if side == "left" \
-            else (spec["x"] + spec["r"], cy)
-    cy = spec["y"] + spec["h"] / 2
-    return (spec["x"], cy) if side == "left" else (spec["x"] + spec["w"], cy)
+    cx, cy = spec["x"], spec["y"]
+    rx = ry = spec["r"] if spec["shape"] == "circle" else None
+    if spec["shape"] != "circle":
+        rx, ry = spec["w"] / 2, spec["h"] / 2
+    return {
+        "left": (cx - rx, cy), "right": (cx + rx, cy),
+        "top": (cx, cy - ry), "bottom": (cx, cy + ry),
+    }[side]
 
 
-def _flow_node_svg(node_id: str, spec: dict, counts: Counter) -> str:
+def _flow_edge_path(f: dict, t: dict) -> str:
+    dx, dy = t["x"] - f["x"], t["y"] - f["y"]
+    if abs(dy) > abs(dx) * 1.3:
+        x1, y1 = _flow_anchor(f, "bottom" if dy > 0 else "top")
+        x2, y2 = _flow_anchor(t, "top" if dy > 0 else "bottom")
+        my = (y1 + y2) / 2
+        return f"M {x1},{y1} C {x1},{my} {x2},{my} {x2},{y2}"
+    x1, y1 = _flow_anchor(f, "right")
+    x2, y2 = _flow_anchor(t, "left")
+    mx = (x1 + x2) / 2
+    return f"M {x1},{y1} C {mx},{y1} {mx},{y2} {x2},{y2}"
+
+
+def _flow_stage_age(conn: sqlite3.Connection, snaps, states: list[str]) -> float | None:
+    """Median days-in-state across packages currently in any of `states`."""
+    ages = []
+    for s in snaps:
+        if s["state"] in states:
+            days = _days_since(db.state_entered_at(conn, s["package"]))
+            if days is not None:
+                ages.append(days)
+    if not ages:
+        return None
+    ages.sort()
+    mid = len(ages) // 2
+    if len(ages) % 2:
+        return ages[mid]
+    return (ages[mid - 1] + ages[mid]) / 2
+
+
+def _flow_loopback_path(f: dict, t: dict) -> str:
+    """Bespoke arc for the FTBFS/Excuses -> Upload retry loops, which arc
+    back past the Build/Test nodes rather than crossing straight through."""
+    r = f["r"]
+    x1, y1 = f["x"] - r * 0.6, f["y"] - r * 0.7
+    c1x, c1y = f["x"] - 140, f["y"] - 60
+    c2x, c2y = t["x"] - 60, t["y"] + 140
+    x2, y2 = t["x"] - 10, t["y"] + t["h"] / 2 - 2
+    return f"M {x1},{y1} C {c1x},{c1y} {c2x},{c2y} {x2},{y2}"
+
+
+def _flow_node_svg(node_id: str, spec: dict, counts: Counter,
+                    heat: float | None = None,
+                    age_days: float | None = None) -> str:
     states = spec.get("states")
     count = sum(counts.get(s, 0) for s in states) if states else None
     label = spec.get("label") or (STATE_LABELS[states[0]] if states else "")
-    sub = ""
-    if states and len(states) == 2 and not spec.get("hub"):
-        sub = " + ".join(f"{counts.get(s, 0)} {STATE_LABELS[s].lower()}"
-                          for s in states)
+    sub = spec.get("sub", "")
+    if age_days is not None:
+        age_txt = f"med {age_days:.0f}d"
+        sub = f"{sub} · {age_txt}" if sub else age_txt
 
     if spec.get("hub"):
         color = "var(--bar)"
     elif not states:
         color = "var(--muted)"
-    elif node_id == "devel-hub":
+    elif node_id == "devel":
         color = "var(--good)"
     else:
         color = _state_color(states[0])
@@ -700,43 +745,48 @@ def _flow_node_svg(node_id: str, spec: dict, counts: Counter) -> str:
         classes.append("hub")
     if spec.get("dashed"):
         classes.append("dashed")
-    # Circles carry their status as a stroke color; rects use the left tab
-    # below instead, so the border stays the shared neutral card border.
-    style = (f' style="stroke:{color}"'
-             if spec["shape"] == "circle" and (spec.get("dashed") or states)
-             else "")
+    # Only circles carry their status as a stroke color; diamonds (the
+    # pass-through process steps) keep the shared neutral card border.
+    decls = []
+    if spec["shape"] == "circle" and (spec.get("dashed")
+                                       or (states and not spec.get("hub"))):
+        decls.append(f"stroke:{color}")
+    if heat is not None:
+        # Volume relative to the other holding pens, as a fill wash — a
+        # thin colored outline on an otherwise white circle reads as pale
+        # no matter how big the number inside is.
+        pct = 10 + 35 * max(0.0, min(1.0, heat))
+        decls.append(f"fill:color-mix(in srgb, {color} {pct:.0f}%, var(--surface))")
+    if age_days is not None:
+        # Longer-stuck holding pens get a heavier border, independent of
+        # volume, so "big and stale" outranks "big because a batch landed".
+        width = 1.5 + 3.0 * max(0.0, min(1.0, age_days / 30.0))
+        decls.append(f"stroke-width:{width:.1f}")
+    style = f' style="{";".join(decls)}"' if decls else ""
 
-    if spec["shape"] == "circle":
-        r = spec["r"]
-        shape_svg = (f'<circle cx="{spec["x"]}" cy="{spec["y"]}" r="{r:.1f}" '
-                     f'class="{" ".join(classes)}"{style}></circle>')
-        cx = spec["x"]
-        lines = []
-        if count is not None:
-            lines.append((count, "count"))
-        lines.append((label, "node-label"))
-        if sub:
-            lines.append((sub, "sub-label"))
-        start_y = spec["y"] - ((len(lines) - 1) * 13) / 2 + 4
-        # html.escape (not _e — its `or ""` would blank out a count of 0)
-        text_svg = "".join(
-            f'<text x="{cx}" y="{start_y + i * 13:.1f}" text-anchor="middle" '
-            f'class="{cls}">{html.escape(str(v))}</text>'
-            for i, (v, cls) in enumerate(lines))
+    cx, cy = spec["x"], spec["y"]
+    if spec["shape"] == "diamond":
+        w, h = spec["w"], spec["h"]
+        points = f"{cx},{cy - h / 2} {cx + w / 2},{cy} {cx},{cy + h / 2} {cx - w / 2},{cy}"
+        shape_svg = (f'<polygon points="{points}" '
+                     f'class="{" ".join(classes)}"{style}></polygon>')
     else:
-        tab = (f'<rect x="{spec["x"]}" y="{spec["y"]}" width="5" '
-               f'height="{spec["h"]}" rx="2.5" fill="{color}"></rect>'
-               if not spec.get("hub") and states else "")
-        shape_svg = (f'<rect x="{spec["x"]}" y="{spec["y"]}" '
-                     f'width="{spec["w"]}" height="{spec["h"]}" rx="10" '
-                     f'class="{" ".join(classes)}"{style}></rect>{tab}')
-        cx = spec["x"] + spec["w"] / 2
-        cy = spec["y"] + spec["h"] / 2
-        text_svg = (
-            f'<text x="{cx}" y="{cy - 4}" text-anchor="middle" '
-            f'class="node-label">{_e(label)}</text>'
-            f'<text x="{cx}" y="{cy + 15}" text-anchor="middle" '
-            f'class="count">{count if count is not None else ""}</text>')
+        r = spec["r"]
+        shape_svg = (f'<circle cx="{cx}" cy="{cy}" r="{r:.1f}" '
+                     f'class="{" ".join(classes)}"{style}></circle>')
+
+    lines = []
+    if count is not None:
+        lines.append((count, "count"))
+    lines.append((label, "node-label"))
+    if sub:
+        lines.append((sub, "sub-label"))
+    start_y = cy - ((len(lines) - 1) * 13) / 2 + 4
+    # html.escape (not _e — its `or ""` would blank out a count of 0)
+    text_svg = "".join(
+        f'<text x="{cx}" y="{start_y + i * 13:.1f}" text-anchor="middle" '
+        f'class="{cls}">{html.escape(str(v))}</text>'
+        for i, (v, cls) in enumerate(lines))
 
     inner = f'<g class="node" data-node="{node_id}">{shape_svg}{text_svg}</g>'
     if states:
@@ -745,51 +795,42 @@ def _flow_node_svg(node_id: str, spec: dict, counts: Counter) -> str:
     return inner
 
 
-def _flow_edges_svg(counts: Counter, nodes: dict) -> str:
-    peak = max((counts.get(s, 0) for s in _FLOW_RIBBON_STATES), default=1) or 1
-    # Retry edges all return to the same hub — if they all landed on its
-    # single right-anchor point they'd stack on top of each other, so
-    # spread their landing points along the hub's right edge instead.
-    retry_order = [e[0] for e in _FLOW_EDGES if e[3]]
-    paths = []
-    for from_id, to_id, state, retry in _FLOW_EDGES:
-        f, t = nodes[from_id], nodes[to_id]
-        count = counts.get(state, 0)
-        color = _state_color(state)
-        # Same monotonic S-curve (control points at the shared x midpoint,
-        # each at its own endpoint's y) as the forward ribbons below — it
-        # never loops back on itself. The retry loop's control-point math
-        # used to diverge from this and produced a self-intersecting curve
-        # that rendered as a solid rosette once dashed.
-        if retry:
-            width = _flow_width(count, peak, cap=8.0)
-            x1, y1 = _flow_anchor(f, "left")
-            idx = retry_order.index(from_id)
-            x2 = t["x"] + t["w"]
-            y2 = t["y"] + t["h"] * (idx + 1) / (len(retry_order) + 1)
-            dash_len, gap_len = width * 2.2, width * 1.6
-            extra = f";stroke-dasharray:{dash_len:.1f} {gap_len:.1f}"
-            cls = ' class="edge dashed"'
-        else:
-            width = _flow_width(count, peak)
-            x1, y1 = _flow_anchor(f, "right")
-            x2, y2 = _flow_anchor(t, "left")
-            extra = ""
-            cls = ' class="edge"'
-        mx = (x1 + x2) / 2
-        d = f"M {x1},{y1} C {mx},{y1} {mx},{y2} {x2},{y2}"
-        paths.append(
-            f'<path d="{d}"{cls} style="stroke:{color};stroke-width:'
-            f'{width:.1f}{extra}" data-from="{from_id}" data-to="{to_id}"></path>')
+def _flow_edges_svg(nodes: dict) -> str:
+    paths = [
+        '<defs><marker id="flow-arrow" markerWidth="8" markerHeight="8" '
+        'refX="6" refY="3" orient="auto">'
+        '<path d="M0,0 L6,3 L0,6 Z" fill="var(--muted)"></path>'
+        '</marker></defs>'
+    ]
+    for from_id, to_id in _FLOW_EDGES_SOLID:
+        d = _flow_edge_path(nodes[from_id], nodes[to_id])
+        paths.append(f'<path d="{d}" class="edge" marker-end="url(#flow-arrow)" '
+                     f'data-from="{from_id}" data-to="{to_id}"></path>')
+    for from_id, to_id in _FLOW_EDGES_LOOP:
+        d = _flow_edge_path(nodes[from_id], nodes[to_id])
+        paths.append(f'<path d="{d}" class="edge dashed" '
+                     f'data-from="{from_id}" data-to="{to_id}"></path>')
+    for from_id, to_id in _FLOW_EDGES_RETURN:
+        d = _flow_loopback_path(nodes[from_id], nodes[to_id])
+        paths.append(f'<path d="{d}" class="edge dashed" '
+                     f'data-from="{from_id}" data-to="{to_id}"></path>')
     return "".join(paths)
 
 
-def _flow(counts: Counter, snaps) -> str:
+def _flow(conn: sqlite3.Connection, counts: Counter, snaps) -> str:
     resolved = _flow_resolve(counts)
-    edges_svg = _flow_edges_svg(counts, resolved)
-    nodes_svg = "".join(_flow_node_svg(nid, spec, counts)
-                         for nid, spec in resolved.items())
-    svg = (f'<svg class="diagram" viewBox="0 0 1010 460" '
+    edges_svg = _flow_edges_svg(resolved)
+    heat_peak = max((sum(counts.get(s, 0) for s in _FLOW_NODES[n]["states"])
+                      for n in _FLOW_HEAT_NODES), default=1) or 1
+    nodes_svg = "".join(
+        _flow_node_svg(
+            nid, spec, counts,
+            heat=(sum(counts.get(s, 0) for s in spec["states"]) / heat_peak
+                  if nid in _FLOW_HEAT_NODES else None),
+            age_days=(_flow_stage_age(conn, snaps, spec["states"])
+                      if nid in _FLOW_HEAT_NODES else None))
+        for nid, spec in resolved.items())
+    svg = (f'<svg class="diagram" viewBox="0 0 1000 560" '
            f'id="flow-svg">{edges_svg}{nodes_svg}</svg>')
 
     pkg_names = sorted(s["package"] for s in snaps)
@@ -934,7 +975,7 @@ def render_index(conn: sqlite3.Connection, team: str) -> str:
  · excuses generated {_e(run['excuses_generated'])}</div>
 <div class="tiles">{''.join(tiles)}</div>
 <h2>Pipeline flow</h2>
-{_flow(counts, snaps)}
+{_flow(conn, counts, snaps)}
 <h2>In proposed-migration ({in_proposed})</h2>
 {_pipeline_table(conn, snaps)}
 <h2>Behind Debian ({behind})</h2>
