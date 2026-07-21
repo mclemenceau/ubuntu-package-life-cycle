@@ -65,7 +65,12 @@ requests) with five interconnected pages:
 - **packages.html** — every team package with client-side filters (state,
   bug counts, time in state, free text) and sortable columns; each row
   expands to detail plus out-links (Launchpad, excuses, Debian tracker).
-  Package names everywhere link here first (`#pkg-<name>`).
+  Package names everywhere link here first (`#pkg-<name>`). Pass
+  `--groups <file.yaml>` (or set `UPLC_GROUPS`) to add a Group column and
+  filter chips from a local `{group: [package, ...]}` mapping — e.g. squads
+  or sub-teams. uplc ships no groups of its own and never fetches or
+  bundles this file; without the flag the page renders exactly as it does
+  today.
 - **bugs.html** — bug prioritization: pipeline-gating bugs first, opened
   vs closed trend, a table of team packages with a pending SRU (verification
   status per bug, from the archive's `sru_report.yaml`), and a filterable

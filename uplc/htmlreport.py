@@ -149,6 +149,7 @@ _CSS = """
   background: rgba(58,127,222,0.16); }
 .uplc .flag { font-size: 12.5px; color: var(--ink-2); white-space: nowrap;
   display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+.uplc .fsep { width: 1px; align-self: stretch; background: var(--border); }
 .uplc .fcount { margin-left: auto; color: var(--muted); font-size: 12.5px; }
 .uplc .scroll { overflow-x: auto; }
 .uplc table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
@@ -231,6 +232,8 @@ _PKG_JS = """
   var q = document.getElementById('fq');
   var chips = Array.prototype.slice.call(
     document.querySelectorAll('.fchip[data-state]'));
+  var gchips = Array.prototype.slice.call(
+    document.querySelectorAll('.fchip[data-group]'));
   var flags = {
     bugs: document.getElementById('f-bugs'),
     high: document.getElementById('f-high'),
@@ -241,11 +244,18 @@ _PKG_JS = """
     var states = chips.filter(function (c) {
       return c.classList.contains('on');
     }).map(function (c) { return c.dataset.state; });
+    var grps = gchips.filter(function (c) {
+      return c.classList.contains('on');
+    }).map(function (c) { return c.dataset.group; });
     var text = q.value.trim().toLowerCase();
     var n = 0;
     rows.forEach(function (r) {
       var show = true;
       if (states.length && states.indexOf(r.dataset.state) < 0) show = false;
+      if (show && grps.length) {
+        var rg = r.dataset.group ? r.dataset.group.split(',') : [];
+        if (!grps.some(function (g) { return rg.indexOf(g) >= 0; })) show = false;
+      }
       if (show && text && r.dataset.text.indexOf(text) < 0) show = false;
       if (show && flags.bugs.checked && +r.dataset.bugs === 0) show = false;
       if (show && flags.high.checked && +r.dataset.high === 0) show = false;
@@ -259,6 +269,7 @@ _PKG_JS = """
       var parts = [];
       if (text) parts.push('q=' + encodeURIComponent(text));
       if (states.length) parts.push('s=' + states.join(','));
+      if (grps.length) parts.push('g=' + grps.map(encodeURIComponent).join(','));
       if (flags.bugs.checked) parts.push('b=1');
       if (flags.high.checked) parts.push('h=1');
       if (flags.stuck.checked) parts.push('k=1');
@@ -269,6 +280,11 @@ _PKG_JS = """
 
   q.addEventListener('input', function () { apply(true); });
   chips.forEach(function (c) {
+    c.addEventListener('click', function () {
+      c.classList.toggle('on'); apply(true);
+    });
+  });
+  gchips.forEach(function (c) {
     c.addEventListener('click', function () {
       c.classList.toggle('on'); apply(true);
     });
@@ -313,6 +329,12 @@ _PKG_JS = """
         if (v.split(',').indexOf(c.dataset.state) >= 0)
           c.classList.add('on');
       });
+      if (k === 'g') {
+        var wanted = v.split(',').map(decodeURIComponent);
+        gchips.forEach(function (c) {
+          if (wanted.indexOf(c.dataset.group) >= 0) c.classList.add('on');
+        });
+      }
       if (k === 'b') flags.bugs.checked = true;
       if (k === 'h') flags.high.checked = true;
       if (k === 'k') flags.stuck.checked = true;
@@ -1022,11 +1044,13 @@ def _pkg_detail_row(s, detail: dict, colspan: int) -> str:
             + "".join(lines) + "</td></tr>")
 
 
-def render_packages(conn: sqlite3.Connection, team: str) -> str:
+def render_packages(conn: sqlite3.Connection, team: str,
+                     groups: dict[str, list[str]] | None = None) -> str:
     run, snaps = _latest(conn, team)
     counts = Counter(s["state"] for s in snaps)
     bugstats = db.open_bug_counts(conn)
     have_bugs = db.bug_count(conn) > 0
+    groups = groups or {}
 
     blocked = sum(counts.get(s, 0) for s in BLOCKED_STATES)
     in_proposed = sum(counts.get(s, 0) for s in PROPOSED_STATES)
@@ -1046,19 +1070,27 @@ def render_packages(conn: sqlite3.Connection, team: str) -> str:
         f'<span class="dot" style="background:{_state_color(s)}"></span>'
         f"{_e(STATE_LABELS[s])} ({counts[s]})</button>"
         for s in STATES if counts.get(s))
+    have_groups = bool(groups)
+    all_groups = sorted({g for s in snaps for g in groups.get(s["package"], [])})
+    gchips = "".join(
+        f'<button class="fchip" data-group="{_e(g)}" type="button">{_e(g)}</button>'
+        for g in all_groups)
+    group_filter = (f'<span class="fsep"></span>{gchips}' if have_groups else "")
     filters = f"""<div class="filters">
 <input id="fq" type="search" placeholder="filter packages…" aria-label="filter packages">
-{chips}
+{chips}{group_filter}
 <label class="flag"><input id="f-bugs" type="checkbox">has open bugs</label>
 <label class="flag"><input id="f-high" type="checkbox">Critical/High bugs</label>
 <label class="flag"><input id="f-stuck" type="checkbox">≥ 7d in state</label>
 <span class="fcount" id="fcount"></span>
 </div>"""
 
+    group_header = '<th>Group</th>' if have_groups else ""
     header = ('<thead><tr>'
               '<th class="sort" data-key="pkg">Package</th>'
               '<th class="sort" data-key="statei" data-num>State</th>'
               '<th class="sort" data-key="bugs" data-num>Bugs</th>'
+              f'{group_header}'
               '<th>Ubuntu devel</th><th>Debian unstable</th><th>Proposed</th>'
               "</tr></thead>")
     bodies = []
@@ -1082,24 +1114,31 @@ def render_packages(conn: sqlite3.Connection, team: str) -> str:
         # same threshold as the filter) — fresher ages live in data-days.
         agehint = (f' <span class="agehint">{_e(_age_str(db.state_entered_at(conn, pkg)))}'
                    "</span>" if days is not None and days >= 7 else "")
+        pkg_groups = groups.get(pkg, [])
         text = " ".join([pkg, STATE_LABELS[s["state"]],
-                         s["summary"] or ""]).lower()
+                         s["summary"] or "", " ".join(pkg_groups)]).lower()
+        group_cell = (f'<td class="cell">{_e(", ".join(pkg_groups)) or "—"}</td>'
+                      if have_groups else "")
+        group_attr = (f' data-group="{_e(",".join(pkg_groups))}"'
+                      if have_groups else "")
         bodies.append(
             f'<tbody class="pkgrow" id="pkg-{_e(pkg)}" data-pkg="{_e(pkg)}"'
             f' data-state="{_e(s["state"])}"'
             f' data-statei="{STATES.index(s["state"])}"'
             f' data-days="{-1 if days is None else round(days, 2)}"'
             f' data-bugs="{stats["open"]}" data-high="{stats["high"]}"'
+            f'{group_attr}'
             f' data-text="{_e(text)}">'
             "<tr>"
             f'<td class="pkg"><a href="#pkg-{_e(pkg)}">{_e(pkg)}</a></td>'
             f"<td>{_chip(s['state'])}{agehint}</td>"
             f'<td class="num cell bugs">{bugcell}</td>'
+            f'{group_cell}'
             f'<td class="ver">{_e(s["ubuntu_version"]) or "—"}</td>'
             f'<td class="ver">{_e(s["debian_version"]) or "—"}</td>'
             f'<td class="ver">{_e(s["proposed_version"]) or ""}</td>'
             "</tr>"
-            + _pkg_detail_row(s, detail, 6)
+            + _pkg_detail_row(s, detail, 7 if have_groups else 6)
             + "</tbody>")
 
     return f"""<title>Packages — {_e(team)}</title>

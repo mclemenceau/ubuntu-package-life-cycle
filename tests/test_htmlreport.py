@@ -89,6 +89,23 @@ class TestRenderPages(unittest.TestCase):
         page = htmlreport.render_packages(self.conn, "foundations-bugs")
         self.assertIn("bugs-sync", page)
 
+    def test_packages_page_without_groups_has_no_group_ui(self):
+        page = htmlreport.render_packages(self.conn, "foundations-bugs")
+        # The filter script always wires up a group-chip hook (harmless when
+        # there are none); what must be absent is the row attribute/column.
+        self.assertNotIn(' data-group="', page)
+        self.assertNotIn("<th>Group</th>", page)
+
+    def test_packages_page_with_groups(self):
+        page = htmlreport.render_packages(
+            self.conn, "foundations-bugs",
+            groups={"glibc": ["Runtimes"], "grub2": ["Boot"]})
+        self.assertIn("<th>Group</th>", page)
+        self.assertIn('data-group="Runtimes"', page)
+        self.assertIn('<button class="fchip" data-group="Boot"', page)
+        # openssl has no group entry: renders as an em dash, not blank/crash.
+        self.assertIn('data-group=""', page)
+
     def test_bugs_page_gating_and_trend(self):
         _seed_bugs(self.conn)
         page = htmlreport.render_bugs(self.conn, "foundations-bugs")

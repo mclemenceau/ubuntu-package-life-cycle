@@ -95,11 +95,19 @@ def _wrap_page(body: str, *, feeds: bool = True) -> str:
             f"{body}</body></html>")
 
 
-def _write_site(conn, team: str, outdir: Path, base_url: str = "") -> list[Path]:
-    from .htmlreport import PAGES, render_feed_atom, render_feed_json
+def _write_site(conn, team: str, outdir: Path, base_url: str = "",
+                groups_path=None) -> list[Path]:
+    import functools
+
+    from .groups import load_groups
+    from .htmlreport import PAGES, render_feed_atom, render_feed_json, render_packages
     outdir.mkdir(parents=True, exist_ok=True)
+    pages = dict(PAGES)
+    groups = load_groups(groups_path)
+    if groups:
+        pages["packages.html"] = functools.partial(render_packages, groups=groups)
     written = []
-    for name, renderer in PAGES.items():
+    for name, renderer in pages.items():
         path = outdir / name
         path.write_text(_wrap_page(renderer(conn, team)))
         written.append(path)
@@ -114,6 +122,7 @@ def _write_site(conn, team: str, outdir: Path, base_url: str = "") -> list[Path]
 def _cmd_html(args) -> int:
     conn = db.connect(args.db)
     base_url = args.base_url or os.environ.get("UPLC_BASE_URL", "")
+    groups_path = args.groups or os.environ.get("UPLC_GROUPS")
     if args.output.suffix == ".html":
         # Single-file compatibility mode: just the overview page.
         from .htmlreport import render_index
@@ -122,7 +131,7 @@ def _cmd_html(args) -> int:
         print(f"wrote {args.output} (overview only; "
               "use a directory for all pages)")
         return 0
-    for path in _write_site(conn, args.team, args.output, base_url):
+    for path in _write_site(conn, args.team, args.output, base_url, groups_path):
         print(f"wrote {path}")
     return 0
 
@@ -132,8 +141,9 @@ def _cmd_serve(args) -> int:
     import tempfile
 
     conn = db.connect(args.db)
+    groups_path = args.groups or os.environ.get("UPLC_GROUPS")
     tmpdir = Path(tempfile.mkdtemp(prefix="uplc-"))
-    _write_site(conn, args.team, tmpdir)
+    _write_site(conn, args.team, tmpdir, groups_path=groups_path)
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -208,11 +218,18 @@ def main(argv=None) -> int:
     p.add_argument("--base-url", default=None,
                    help="public URL of the site, used for links in the "
                         "digest feeds (default: $UPLC_BASE_URL)")
+    p.add_argument("--groups", type=Path, default=None,
+                   help="optional local YAML file mapping group name -> "
+                        "package list, adds a Group column/filter to "
+                        "packages.html (default: $UPLC_GROUPS, unset means "
+                        "no grouping; never fetched or bundled)")
     p.set_defaults(func=_cmd_html)
 
     p = sub.add_parser("serve", help="serve the dashboard over local HTTP")
     _add_common(p)
     p.add_argument("-p", "--port", type=int, default=8321)
+    p.add_argument("--groups", type=Path, default=None,
+                   help="see `uplc html --groups`")
     p.set_defaults(func=_cmd_serve)
 
     args = parser.parse_args(argv)
