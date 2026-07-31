@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS digest_runs (
     date TEXT NOT NULL,                 -- YYYY-MM-DD the digest is "for"
     bug_count INTEGER,
     used_llm INTEGER,                   -- 0/1
+    flagged INTEGER,                    -- 0/1: LLM cited an unverified bug id
     body TEXT                           -- final markdown
 );
 """
@@ -119,7 +120,17 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive, idempotent column upgrades for databases created before
+    a field existed — history is never rewritten, only extended."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(digest_runs)")}
+    if "flagged" not in cols:
+        conn.execute("ALTER TABLE digest_runs ADD COLUMN flagged INTEGER")
+        conn.commit()
 
 
 def record_run(
@@ -367,13 +378,14 @@ def record_digest_run(
     bug_count: int,
     used_llm: bool,
     body: str,
+    flagged: bool = False,
 ) -> int:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     cur = conn.execute(
         "INSERT INTO digest_runs (ran_at, team, since_iso, until_iso, date,"
-        " bug_count, used_llm, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        " bug_count, used_llm, flagged, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (now, team, since_iso, until_iso, date, bug_count,
-         1 if used_llm else 0, body))
+         1 if used_llm else 0, 1 if flagged else 0, body))
     conn.commit()
     return cur.lastrowid
 

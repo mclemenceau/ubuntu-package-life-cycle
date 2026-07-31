@@ -1857,6 +1857,8 @@ def _digest_summary(row) -> str:
     d = datetime.strptime(row["date"], "%Y-%m-%d")
     label = f"{d.strftime('%A')} {d.day} {d.strftime('%B')}"
     note = "" if row["used_llm"] else " · deterministic"
+    if row["flagged"]:
+        note += " · ⚠️ flagged"
     return f"{label} — {row['bug_count'] or 0} bugs{note}"
 
 

@@ -433,14 +433,29 @@ class TestValidation(unittest.TestCase):
         md = "# digest\n[#2160614](https://bugs.launchpad.net/bugs/2160614)"
         self.assertEqual(digest.validate_output(md, facts), [])
 
-    def test_validate_rejects_invented_and_empty(self):
+    def test_validate_rejects_empty_and_headingless(self):
         facts = {"bugs": [{"id": 2160614}]}
         self.assertEqual(digest.validate_output("  ", facts),
                          ["empty output"])
-        problems = digest.validate_output("# d\n#9999999", facts)
-        self.assertTrue(any("9999999" in p for p in problems))
         problems = digest.validate_output("no heading", facts)
         self.assertTrue(any("heading" in p for p in problems))
+        # invented bug citations are a structurally valid narrative —
+        # validate_output no longer rejects them, see invented_bug_ids
+        self.assertEqual(digest.validate_output("# d\n#9999999", facts), [])
+
+    def test_invented_bug_ids(self):
+        facts = {"bugs": [{"id": 2160614}]}
+        self.assertEqual(
+            digest.invented_bug_ids("# d\n#9999999 and #2160614", facts),
+            {9999999})
+        self.assertEqual(
+            digest.invented_bug_ids("# d\n#2160614", facts), set())
+
+    def test_flag_invented_bugs_prepends_warning(self):
+        out = digest.flag_invented_bugs("# d\nbody", {9999999})
+        self.assertTrue(out.startswith("> ⚠️"))
+        self.assertIn("9999999", out)
+        self.assertIn("# d\nbody", out)
 
 
 class TestRunLLM(unittest.TestCase):
@@ -526,7 +541,17 @@ class TestGenerate(unittest.TestCase):
         self.assertEqual(second.bug_count, 0)
         self.assertIn("No team bug activity", second.body)
 
-    def test_rejected_llm_output_falls_back(self):
+    def test_empty_llm_output_falls_back(self):
+        db.set_bug_sync_state(self.conn, "foundations-bugs",
+                              "2026-07-17T10:00:00+00:00")
+        self.conn.commit()
+        with mock.patch.object(digest, "run_llm", return_value="no heading"):
+            result = digest.generate(self.conn, "foundations-bugs",
+                                     since=SINCE)
+        self.assertFalse(result.used_llm)
+        self.assertFalse(result.flagged)
+
+    def test_invented_bug_citation_flags_but_keeps_narrative(self):
         db.set_bug_sync_state(self.conn, "foundations-bugs",
                               "2026-07-17T10:00:00+00:00")
         self.conn.commit()
@@ -534,8 +559,12 @@ class TestGenerate(unittest.TestCase):
                                return_value="# d\ninvented [#9999999](x)"):
             result = digest.generate(self.conn, "foundations-bugs",
                                      since=SINCE)
-        self.assertFalse(result.used_llm)
-        self.assertNotIn("9999999", result.body)
+        self.assertTrue(result.used_llm)
+        self.assertTrue(result.flagged)
+        self.assertIn("9999999", result.body)
+        self.assertIn("⚠️", result.body)
+        row = db.latest_digest_run(self.conn, "foundations-bugs")
+        self.assertEqual(row["flagged"], 1)
 
 
 class TestDbHelpers(unittest.TestCase):

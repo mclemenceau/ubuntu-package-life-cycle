@@ -12,6 +12,13 @@ so a cron run always produces a digest.
 LLM runner contract: invoked as `<cmd> <prompt>` with the facts JSON on
 stdin, prints Markdown on stdout, exits 0. Configured via --llm-cmd /
 $UPLC_LLM_CMD; uplc knows nothing about which model runs.
+
+Output is validated before it ships: empty/malformed output still falls
+back to the deterministic rendering, but a narrative that cites a bug id
+absent from this run's facts is kept and flagged with an inline warning
+instead of discarded outright (see `flag_invented_bugs`) — a single
+dubious citation shouldn't cost the whole digest, but it must be
+obviously marked so the reader spot-checks it.
 """
 
 import json
@@ -654,20 +661,41 @@ def cited_bug_ids(markdown: str) -> set[int]:
 
 
 def validate_output(markdown: str, facts: dict) -> list[str]:
-    """Violations that force the deterministic fallback ([] = ok)."""
+    """Structural violations that force the deterministic fallback ([] = ok).
+
+    Bug-citation hallucinations are handled separately (see
+    `invented_bug_ids`/`flag_invented_bugs`) — they're flagged inline
+    rather than discarding an otherwise-good narrative.
+    """
     problems = []
     text = markdown.strip()
     if not text:
         return ["empty output"]
     if not text.startswith("#"):
         problems.append("does not start with a Markdown heading")
-    known = {b["id"] for b in facts["bugs"]}
-    invented = cited_bug_ids(text) - known
-    if invented:
-        problems.append(
-            "cites bug ids absent from the facts: "
-            + ", ".join(str(i) for i in sorted(invented)))
     return problems
+
+
+def invented_bug_ids(markdown: str, facts: dict) -> set[int]:
+    """Bug ids cited in the narrative but absent from this run's facts."""
+    known = {b["id"] for b in facts["bugs"]}
+    return cited_bug_ids(markdown) - known
+
+
+def flag_invented_bugs(markdown: str, invented: set[int]) -> str:
+    """Prepend a visible warning for narratives citing unverified bug ids.
+
+    Keeps the LLM narrative instead of discarding it wholesale — a single
+    dubious citation shouldn't cost the whole digest, but it must be
+    obvious to the reader which citation(s) to double-check.
+    """
+    ids = ", ".join(f"#{i}" for i in sorted(invented))
+    plural = "s" if len(invented) > 1 else ""
+    warning = (
+        f"> ⚠️ **Unverified bug citation{plural}:** {ids} not "
+        "found in this run's source data — possible hallucination, "
+        "verify on Launchpad before relying on it.\n\n")
+    return warning + markdown
 
 
 def run_llm(
@@ -708,6 +736,7 @@ class DigestResult:
     bug_count: int
     used_llm: bool
     body: str
+    flagged: bool = False
 
 
 def _snap_dict(row) -> dict:
@@ -780,7 +809,7 @@ def generate(
         team=team, since=since, until=until, date=date,
         sru_rows=sru_rows, prev_sru_rows=prev_sru_rows)
 
-    body, used_llm = None, False
+    body, used_llm, flagged = None, False, False
     if not no_llm:
         body = run_llm(facts, cmd=llm_cmd)
         if body is not None:
@@ -789,6 +818,14 @@ def generate(
                 log.warning("LLM output rejected: %s; using fallback",
                             "; ".join(problems))
                 body = None
+            else:
+                invented = invented_bug_ids(body, facts)
+                if invented:
+                    log.warning(
+                        "LLM output cites unverified bug ids: %s; flagging",
+                        ", ".join(str(i) for i in sorted(invented)))
+                    body = flag_invented_bugs(body, invented)
+                    flagged = True
     if body is None:
         body = render_fallback(facts)
     else:
@@ -798,6 +835,8 @@ def generate(
 
     db.record_digest_run(
         conn, team=team, since_iso=since, until_iso=until, date=date,
-        bug_count=len(bug_ids), used_llm=used_llm, body=body)
+        bug_count=len(bug_ids), used_llm=used_llm, flagged=flagged,
+        body=body)
     return DigestResult(date=date, since=since, until=until,
-                        bug_count=len(bug_ids), used_llm=used_llm, body=body)
+                        bug_count=len(bug_ids), used_llm=used_llm,
+                        flagged=flagged, body=body)

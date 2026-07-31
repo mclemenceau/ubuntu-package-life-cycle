@@ -72,6 +72,8 @@ def _cmd_digest(args) -> int:
     result = digest.generate(conn, args.team, since=args.since,
                              no_llm=args.no_llm, llm_cmd=args.llm_cmd)
     how = "LLM narrative" if result.used_llm else "deterministic fallback"
+    if result.flagged:
+        how += ", flagged: unverified bug citation"
     if args.stdout:
         print(result.body)
     else:
