@@ -719,8 +719,9 @@ def run_llm(
         log.warning("LLM command failed: %s", err)
         return None
     if proc.returncode != 0:
+        # keep the tail: a traceback's actual error is its last line
         log.warning("LLM command exited %d: %s", proc.returncode,
-                    proc.stderr.strip()[:500])
+                    proc.stderr.strip()[-1000:])
         return None
     return proc.stdout.strip() or None
 

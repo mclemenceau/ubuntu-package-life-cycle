@@ -10,27 +10,36 @@ Anthropic API key:
     export UPLC_LLM_MODEL=openrouter/~anthropic/claude-sonnet-latest
     UPLC_LLM_CMD=contrib/llm-opencode-openrouter uplc digest -o digests/
 
-`opencode run` takes the message as positional argv, not stdin, so this
-wrapper folds the facts JSON into the same message it sends opencode and
-asks for `--format json` (newline-delimited event stream) so it can pull
-out just the assistant's text and print that — nothing else — to stdout.
+The prompt and the facts JSON are folded into one message which is fed
+to `opencode run` on stdin (with no positional message, opencode reads
+the message from stdin). Never pass it as argv: Linux caps a single
+argument at 128 KiB (MAX_ARG_STRLEN) and busy days' facts exceed that,
+failing the exec with E2BIG. `--format json` (newline-delimited event
+stream) lets us pull out just the assistant's text and print that -
+nothing else - to stdout.
+
+cron's PATH usually lacks /usr/local/bin, so the binary is resolved from
+$OPENCODE_BIN, then PATH, then the default install location.
 """
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 
 MODEL = os.environ.get("UPLC_LLM_MODEL", "openrouter/~anthropic/claude-sonnet-latest")
 TIMEOUT = float(os.environ.get("UPLC_LLM_TIMEOUT", "280"))
+OPENCODE = (os.environ.get("OPENCODE_BIN") or shutil.which("opencode")
+            or "/usr/local/bin/opencode")
 
 prompt = sys.argv[1]
 facts = sys.stdin.read()
 message = f"{prompt}\n\n{facts}"
 
 proc = subprocess.run(
-    ["opencode", "run", "--format", "json", "-m", MODEL, message],
-    capture_output=True, text=True, timeout=TIMEOUT)
+    [OPENCODE, "run", "--format", "json", "-m", MODEL],
+    input=message, capture_output=True, text=True, timeout=TIMEOUT)
 if proc.returncode != 0:
     sys.stderr.write(proc.stderr)
     sys.exit(proc.returncode)
